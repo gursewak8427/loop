@@ -26,6 +26,8 @@ Loop keeps its settings in `%APPDATA%\Loop` (`~/Library/Application Support/Loop
 
 On macOS, `npm run pack:mac` builds an unsigned `Loop.app` into `release/`.
 
+To work on Loop without real Claude Code sessions, `npm run demo` starts it on made-up projects and sessions in a temp folder, which is removed when Loop closes. Opening a session there replays its made-up conversation; no Claude Code runs. `npm run demo -- --shot desktop.png` saves a screenshot and quits, which is how `docs/screenshots/desktop.png` is made.
+
 ## How the code is laid out
 
 | Where | What |

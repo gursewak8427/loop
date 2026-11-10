@@ -6,6 +6,12 @@
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <p align="center">
+  <img src="docs/screenshots/desktop.png" alt="Loop on the desktop: projects and their sessions on the left, four sessions open side by side">
+</p>
+
+<p align="center"><sub>The desktop app on made-up projects (<code>npm run demo</code>).</sub></p>
+
+<p align="center">
   <img src="docs/screenshots/phone-home.png" width="260" alt="Home on the phone: a plan from the CEO waiting for an OK, and a finished report from the CTO">
   &nbsp;
   <img src="docs/screenshots/phone-chat.png" width="260" alt="A session's conversation on the phone, with the tools it used folded into one line">
@@ -43,6 +49,8 @@ npm ci
 npm run web      # builds the phone app that Loop serves to your phone
 npm start        # runs Loop from source
 ```
+
+To look around without your own sessions, `npm run demo` starts Loop on made-up projects instead. Your own `~/.claude` and Loop settings are not touched.
 
 `npm run pack` builds the app into `release\win-unpacked\Loop.exe`, and `npm run dist` builds an installer.
 
