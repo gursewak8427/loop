@@ -241,6 +241,109 @@ void main() {
     expect(loop.turn, Turn.listening);
   });
 
+  test(
+    'a long silence while it works is filled, and the job keeps the turn',
+    () async {
+      final v = FakeVoice();
+      final s = FakeSession();
+      final loop = make(v, s);
+      loop.start();
+      loop.heard('run the whole test suite');
+      await Future<void>.value();
+      expect(loop.turn, Turn.working);
+      expect(loop.quietLimit, stillWorkingAfter);
+
+      // The screen's clock runs out with nothing read out.
+      loop.stillQuiet();
+      expect(v.spoken.single, 'Still working on it.');
+      expect(
+        loop.reply,
+        isEmpty,
+        reason: 'the screen does not show the filler as an answer',
+      );
+      loop.readingDone();
+      expect(loop.turn, Turn.working, reason: 'nothing to answer yet');
+
+      // Each time it is said the next wait is longer, up to a minute.
+      expect(loop.quietLimit, stillWorkingAfter * 2);
+      loop.stillQuiet();
+      loop.readingDone();
+      expect(loop.quietLimit, stillWorkingAfter * 4);
+      loop.stillQuiet();
+      loop.readingDone();
+      expect(loop.quietLimit, stillWorkingAfter * 4);
+      expect(v.spoken, [
+        'Still working on it.',
+        'Still on it.',
+        'Still going.',
+      ]);
+
+      // Real words reset it.
+      loop.stalled([line('a1', 'Half the tests have run.')]);
+      loop.readingDone();
+      expect(loop.quietLimit, stillWorkingAfter);
+    },
+  );
+
+  test('the silence is only filled while the session works', () {
+    final v = FakeVoice();
+    final s = FakeSession();
+    final loop = make(v, s);
+    loop.start();
+    loop.stillQuiet();
+    expect(loop.turn, Turn.listening);
+    loop.heard('');
+    loop.heard('');
+    expect(loop.turn, Turn.resting);
+    loop.stillQuiet();
+    expect(v.spoken, isEmpty);
+  });
+
+  test(
+    'words that arrive while it says "still working" are read right after',
+    () async {
+      final v = FakeVoice();
+      final s = FakeSession();
+      final loop = make(v, s);
+      loop.start();
+      loop.heard('build it');
+      await Future<void>.value();
+      loop.stillQuiet();
+      expect(loop.turn, Turn.speaking);
+
+      // The job ends while the filler is being said.
+      loop.readNew([line('a1', 'The build passed.')]);
+      expect(v.spoken, [
+        'Still working on it.',
+      ], reason: 'not said over the filler');
+      loop.readingDone();
+      expect(v.spoken, ['Still working on it.', 'The build passed.']);
+      expect(loop.reply, 'The build passed.');
+      loop.readingDone();
+      expect(
+        loop.turn,
+        Turn.listening,
+        reason: 'the turn was over, so it is yours',
+      );
+    },
+  );
+
+  test(
+    'a turn that ends with nothing to say during the filler still hands it back',
+    () async {
+      final v = FakeVoice();
+      final s = FakeSession();
+      final loop = make(v, s);
+      loop.start();
+      loop.heard('tidy up');
+      await Future<void>.value();
+      loop.stillQuiet();
+      loop.readNew(const []);
+      loop.readingDone();
+      expect(loop.turn, Turn.listening);
+    },
+  );
+
   test('a session still working is not interrupted: the words wait for it', () async {
     final v = FakeVoice();
     final s = FakeSession()..busy = true;
