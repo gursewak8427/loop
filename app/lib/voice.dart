@@ -110,8 +110,10 @@ class Voice {
     return _sttReady;
   }
 
-  /// Start listening. [heard] fills as words come; it stops by itself after a pause.
-  Future<void> listen() async {
+  /// Start listening. [heard] fills as words come; it stops by itself after
+  /// [pause] without words. Dictation keeps the long default, so a moment of
+  /// thought does not cut a message short; voice mode passes a shorter one.
+  Future<void> listen({Duration pause = const Duration(seconds: 4)}) async {
     problem.value = '';
     heard.value = '';
     if (!await _ensure()) return;
@@ -122,7 +124,7 @@ class Voice {
         listenOptions: SpeechListenOptions(
           localeId: _sttLocale,
           listenFor: const Duration(minutes: 2),
-          pauseFor: const Duration(seconds: 4),
+          pauseFor: pause,
           partialResults: true,
           listenMode: ListenMode.dictation,
           cancelOnError: true,

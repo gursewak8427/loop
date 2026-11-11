@@ -828,10 +828,15 @@ class _TalkPageState extends State<TalkPage> {
   }
 }
 
+/// How long voice mode waits after you stop talking before it sends. In a
+/// conversation people expect an answer about a second after they finish;
+/// much shorter and a breath mid-sentence sends half a thought.
+const talkPause = Duration(milliseconds: 1500);
+
 /// The phone's own listening and voice, which Loop already uses for dictation.
 class _PhoneVoice implements TalkVoice {
   @override
-  void listen() => Voice.I.listen();
+  void listen() => Voice.I.listen(pause: talkPause);
   @override
   void stopListening() => Voice.I.stop();
   @override
