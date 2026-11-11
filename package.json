@@ -10,7 +10,7 @@
   "scripts": {
     "start": "electron .",
     "demo": "node scripts/demo.js",
-    "test": "node --test test/memory.test.js test/scanner.test.js test/server.test.js test/accounts.test.js test/launch.test.js test/shell.test.js test/remote.test.js test/servers.test.js test/board.test.js test/direct.test.js test/tasks.test.js test/trash.test.js test/phone.test.js test/relay.test.js test/rules.test.js test/remote-switch.test.js test/gate.test.js test/localtools.test.js test/whatsapp.test.js test/subs.test.js test/voice.test.js test/voice-flow.test.js test/renderer.test.js test/demo.test.js",
+    "test": "node --test test/memory.test.js test/scanner.test.js test/server.test.js test/accounts.test.js test/launch.test.js test/shell.test.js test/remote.test.js test/servers.test.js test/board.test.js test/direct.test.js test/tasks.test.js test/trash.test.js test/phone.test.js test/relay.test.js test/rules.test.js test/remote-switch.test.js test/gate.test.js test/localtools.test.js test/whatsapp.test.js test/subs.test.js test/voice.test.js test/voice-flow.test.js test/renderer.test.js test/demo.test.js test/stats.test.js",
     "icon": "python scripts/make-icon.py",
     "pack": "electron-builder --win dir",
     "pack:mac": "electron-builder --mac dir",
