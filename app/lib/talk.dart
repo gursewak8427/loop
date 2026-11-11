@@ -52,6 +52,17 @@ final _told = <String>{};
 /// Past this a reply is a report, not something to listen to.
 const spokenMax = 450;
 
+/// How long a session may work without a word read out before the phone says
+/// it is still going. With your eyes shut, silence sounds like it has stopped.
+const stillWorkingAfter = Duration(seconds: 15);
+
+/// What the phone says then, in turn, so it is not the same line every time.
+const stillWorkingLines = [
+  'Still working on it.',
+  'Still on it.',
+  'Still going.',
+];
+
 /// What the loop is doing now. The words are the ones shown on screen.
 enum Turn { listening, sending, working, speaking, resting }
 
@@ -118,6 +129,10 @@ class TalkLoop extends ChangeNotifier {
   int _quiet = 0; // times in a row nothing was heard
   bool _thenYours = true;
   bool left = false;
+  String _saying = ''; // what the voice is saying now
+  int _stillSaid = 0; // "still working" said since anything real was read out
+  bool _filling = false; // what is being said is only that
+  ({List<Line> lines, bool thenYours})? _missed; // words that came meanwhile
 
   /// True while the screen should keep a watch on a voice that may never say
   /// it has finished.
@@ -135,6 +150,8 @@ class TalkLoop extends ChangeNotifier {
   void listen() {
     if (left) return;
     problem = '';
+    _stillSaid = 0;
+    _missed = null;
     _to(Turn.listening);
     voice.listen();
   }
@@ -249,7 +266,18 @@ class TalkLoop extends ChangeNotifier {
   /// going to look at the logs" - where the session is still working and there
   /// is nothing yet to reply to.
   void readNew(Iterable<Line> lines, {bool thenYours = true}) {
-    if (left || turn == Turn.listening || turn == Turn.speaking) return;
+    if (left || turn == Turn.listening) return;
+    if (turn == Turn.speaking) {
+      // "Still working" is short, and cutting a voice off mid-word is not
+      // reliable on every phone: what came is read the moment it ends instead.
+      if (_filling) {
+        _missed = (
+          lines: lines.toList(),
+          thenYours: thenYours || (_missed?.thenYours ?? false),
+        );
+      }
+      return;
+    }
     final fresh = <String>[];
     for (final l in lines) {
       if (l.id.isEmpty || _readOut.contains(l.id)) continue;
@@ -270,11 +298,32 @@ class TalkLoop extends ChangeNotifier {
   /// written is finished, so it can be read out without waiting for the job.
   void stalled(Iterable<Line> lines) => readNew(lines, thenYours: false);
 
-  void _say(String text, {bool thenYours = true}) {
+  /// How long the session may now work in silence before [stillQuiet]. It
+  /// doubles each time the phone fills the silence, up to a minute, so a long
+  /// build is not narrated every fifteen seconds.
+  Duration get quietLimit =>
+      stillWorkingAfter * (1 << (_stillSaid < 2 ? _stillSaid : 2));
+
+  /// The session has worked for [quietLimit] without a word read out: the
+  /// phone says itself that it is still going. Called by the screen's clock.
+  void stillQuiet() {
+    if (left || turn != Turn.working) return;
+    final line = stillWorkingLines[_stillSaid % stillWorkingLines.length];
+    _stillSaid++;
+    _say(line, thenYours: false, filler: true);
+  }
+
+  void _say(String text, {bool thenYours = true, bool filler = false}) {
     final words = sayable(text);
     if (words.isEmpty) return listen();
     _thenYours = thenYours;
-    reply = words;
+    _filling = filler;
+    _saying = words;
+    if (!filler) {
+      // The screen keeps showing the last real answer, not "still working".
+      reply = words;
+      _stillSaid = 0;
+    }
     _to(Turn.speaking);
     voice.speak(words);
   }
@@ -284,16 +333,20 @@ class TalkLoop extends ChangeNotifier {
   void readingDone({bool late = false}) {
     if (left || turn != Turn.speaking) return;
     if (late) voice.stopSpeaking();
+    _filling = false;
+    final missed = _missed;
+    _missed = null;
     if (_thenYours) {
       listen();
     } else {
       _to(Turn.working);
     }
+    if (missed != null) readNew(missed.lines, thenYours: missed.thenYours);
   }
 
   /// How long the voice could still be talking, for the screen's watch.
   Duration get mostItCouldTake =>
-      Duration(milliseconds: 3000 + reply.length * 110);
+      Duration(milliseconds: 3000 + _saying.length * 110);
 
   // ---- the one tap ----
 
@@ -452,6 +505,8 @@ class _TalkPageState extends State<TalkPage> {
   late final TalkLoop _loop;
   Timer? _settle; // waits for a turn to be properly over
   Timer? _watch; // in case the voice never says it has finished
+  Timer? _still; // a session working in silence for too long
+  Turn? _was; // the turn when the silence clock was last set
 
   @override
   void initState() {
@@ -491,6 +546,7 @@ class _TalkPageState extends State<TalkPage> {
   void dispose() {
     _settle?.cancel();
     _watch?.cancel();
+    _still?.cancel();
     bridge.removeListener(_onBridge);
     Voice.I.listening.removeListener(_onListening);
     Voice.I.speaking.removeListener(_onSpeaking);
@@ -520,6 +576,15 @@ class _TalkPageState extends State<TalkPage> {
         _loop.mostItCouldTake,
         () => _loop.readingDone(late: true),
       );
+    }
+    // The silence is counted from when the work, or the last thing read out
+    // during it, began - not reset by every change on the screen.
+    if (_loop.turn != _was) {
+      _was = _loop.turn;
+      _still?.cancel();
+      if (_loop.turn == Turn.working) {
+        _still = Timer(_loop.quietLimit, _loop.stillQuiet);
+      }
     }
   }
 
@@ -828,10 +893,15 @@ class _TalkPageState extends State<TalkPage> {
   }
 }
 
+/// How long voice mode waits after you stop talking before it sends. In a
+/// conversation people expect an answer about a second after they finish;
+/// much shorter and a breath mid-sentence sends half a thought.
+const talkPause = Duration(milliseconds: 1500);
+
 /// The phone's own listening and voice, which Loop already uses for dictation.
 class _PhoneVoice implements TalkVoice {
   @override
-  void listen() => Voice.I.listen();
+  void listen() => Voice.I.listen(pause: talkPause);
   @override
   void stopListening() => Voice.I.stop();
   @override
