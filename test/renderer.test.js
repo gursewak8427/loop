@@ -42,3 +42,34 @@ test('every renderer file parses on its own', () => {
     assert.doesNotThrow(() => new vm.Script(src, { filename: file }), `${file} does not parse`);
   }
 });
+
+// On a Mac the shortcuts are Cmd, so what the window shows must follow MOD too.
+// Ctrl+Tab is the one that stays Ctrl everywhere: Cmd+Tab belongs to the system.
+test('shortcut hints name Cmd on a Mac, not a fixed Ctrl', () => {
+  const fixed = [];
+  for (const file of loaded) {
+    const lines = fs.readFileSync(path.join(DIR, file), 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      const code = line.replace(/\/\/.*$|^\s*(\/\*\*?|\*).*$/, '');
+      if (/^const MOD =/.test(code)) return; // where MOD itself is set
+      if (/['"`]Ctrl\b/.test(code) && !/'Ctrl'\), ' ', h\('kbd', \{\}, 'Tab'\)/.test(code)) fixed.push(`${file}:${i + 1}`);
+      if (/Ctrl\+(Shift|Enter|K)/.test(code)) fixed.push(`${file}:${i + 1}`);
+    });
+  }
+  assert.deepStrictEqual(fixed, [], 'use MOD for these hints');
+});
+
+test('app shortcuts take Cmd on a Mac and Ctrl elsewhere', () => {
+  const vm = require('node:vm');
+  const src = fs.readFileSync(path.join(DIR, 'app.js'), 'utf8');
+  const head = src.slice(0, src.indexOf('const S = {'));
+  const on = (platform) => vm.runInNewContext(`${head}; ({ MOD, modKey })`, { deck: { platform } });
+  const mac = on('darwin');
+  const win = on('win32');
+  assert.strictEqual(mac.MOD, 'Cmd');
+  assert.strictEqual(win.MOD, 'Ctrl');
+  assert.ok(mac.modKey({ metaKey: true, ctrlKey: false }));
+  assert.ok(!mac.modKey({ metaKey: false, ctrlKey: true }), 'Ctrl stays with the terminal on a Mac');
+  assert.ok(win.modKey({ metaKey: false, ctrlKey: true }));
+  assert.ok(!win.modKey({ metaKey: true, ctrlKey: false }));
+});

@@ -1,4 +1,4 @@
-/* global deck, S, toast, sessionTitle, sessionById, renderTools, tabFor, sayTo, projectTitle */
+/* global deck, MOD, S, toast, sessionTitle, sessionById, renderTools, tabFor, sayTo, projectTitle */
 'use strict';
 
 // ---------- voice mode ----------
@@ -181,7 +181,7 @@ function voiceView() {
     '<span class="voice-orb is-starting"><span class="voice-ring"></span><span class="voice-core"></span></span>',
     '<span class="voice-words"><span class="voice-state">Voice</span><span class="voice-heard"></span></span>',
     '<button class="voice-mute" tabindex="-1" hidden>Stop talking</button>',
-    '<button class="voice-close" tabindex="-1" title="Leave voice mode (Ctrl+Shift+V)">Leave</button>',
+    `<button class="voice-close" tabindex="-1" title="Leave voice mode (${MOD}+Shift+V)">Leave</button>`,
   ].join('');
   // The terminal keeps the keyboard: a click on the bar must not take focus
   // away from what you are typing.
@@ -483,7 +483,7 @@ function closeVoice() {
 /** Whether voice mode is on, for the button in the bar. */
 const voiceOn = () => V.on;
 
-/** The button, and Ctrl+Shift+V: talk to whichever session is in front. */
+/** The button, and Ctrl+Shift+V (Cmd on a Mac): talk to whichever session is in front. */
 function toggleVoice() {
   if (V.on) {
     closeVoice();
@@ -521,7 +521,7 @@ async function voiceField() {
       type: 'select',
       value: list.some((v) => v.id === value) ? value : list[0].id,
       options: list.map((v) => ({ value: v.id, label: `${v.name || v.id}${v.gender ? ' · ' + v.gender : ''}` })),
-      hint: 'Used by voice mode (Ctrl+Shift+V). Pick one and Loop says a line in it so you can hear it.',
+      hint: `Used by voice mode (${MOD}+Shift+V). Pick one and Loop says a line in it so you can hear it.`,
     },
   ];
 }

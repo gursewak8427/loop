@@ -6,6 +6,13 @@
 /* global layoutPanes, renderTabs, setLayout, slotOf, moveToSlot, adoptTab, wireWindows */
 'use strict';
 
+// On a Mac the app's own shortcuts use Cmd, as Mac apps do, and Ctrl is left to
+// the terminal (Ctrl+C interrupts, as in Terminal). Ctrl+Tab still moves between
+// terminals there, since Cmd+Tab belongs to the system.
+const MAC = deck.platform === 'darwin';
+const MOD = MAC ? 'Cmd' : 'Ctrl';
+const modKey = (e) => (MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey);
+
 const S = {
   config: null,
   projects: [],
@@ -269,7 +276,7 @@ function formDialog({ title, body, fields = [], confirm = 'Save', danger, wide, 
     );
     form.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') done(null);
-      if (e.key === 'Enter' && e.ctrlKey) form.requestSubmit();
+      if (e.key === 'Enter' && modKey(e)) form.requestSubmit();
     });
     const scrim = h('div.scrim.dim', { onmousedown: (e) => e.target === scrim && done(null) }, form);
     $('#overlay').append(scrim);
@@ -1916,11 +1923,11 @@ function renderEmpty() {
         {},
         h('span', {}, h('kbd', {}, 'Ctrl'), ' ', h('kbd', {}, 'Tab')),
         h('span', {}, 'Next terminal'),
-        h('span', {}, h('kbd', {}, 'Ctrl'), ' ', h('kbd', {}, 'Shift'), ' ', h('kbd', {}, 'G')),
+        h('span', {}, h('kbd', {}, MOD), ' ', h('kbd', {}, 'Shift'), ' ', h('kbd', {}, 'G')),
         h('span', {}, 'Switch between one terminal and the grid'),
-        h('span', {}, h('kbd', {}, 'Ctrl'), ' ', h('kbd', {}, 'Shift'), ' ', h('kbd', {}, 'B')),
+        h('span', {}, h('kbd', {}, MOD), ' ', h('kbd', {}, 'Shift'), ' ', h('kbd', {}, 'B')),
         h('span', {}, 'Send one prompt to several sessions'),
-        h('span', {}, h('kbd', {}, 'Ctrl'), ' ', h('kbd', {}, 'Shift'), ' ', h('kbd', {}, 'M')),
+        h('span', {}, h('kbd', {}, MOD), ' ', h('kbd', {}, 'Shift'), ' ', h('kbd', {}, 'M')),
         h('span', {}, 'Project memory and knowledge bases'),
         h('span', {}, 'Right-click'),
         h('span', {}, 'Pin, rename, hide or move anything in the list'),
@@ -1942,7 +1949,7 @@ function renderTools() {
       'div.bar-side',
       {},
       tool(
-        S.config.sidebarHidden ? 'Show the project list  Ctrl+Shift+E' : 'Hide the project list  Ctrl+Shift+E',
+        S.config.sidebarHidden ? `Show the project list  ${MOD}+Shift+E` : `Hide the project list  ${MOD}+Shift+E`,
         'panel',
         !S.config.sidebarHidden,
         toggleSidebar,
@@ -1950,8 +1957,8 @@ function renderTools() {
       h(
         'div.seg',
         { role: 'group', 'aria-label': 'Arrangement' },
-        h('button', { class: mode === 'focus' ? 'on' : '', 'data-tip': 'One at a time  Ctrl+Shift+G', onclick: () => setLayout('focus') }, icon('single')),
-        h('button', { class: mode === 'grid' ? 'on' : '', 'data-tip': 'All side by side  Ctrl+Shift+G', onclick: () => setLayout('grid') }, icon('grid')),
+        h('button', { class: mode === 'focus' ? 'on' : '', 'data-tip': `One at a time  ${MOD}+Shift+G`, onclick: () => setLayout('focus') }, icon('single')),
+        h('button', { class: mode === 'grid' ? 'on' : '', 'data-tip': `All side by side  ${MOD}+Shift+G`, onclick: () => setLayout('grid') }, icon('grid')),
       ),
     ),
     h(
@@ -1959,7 +1966,7 @@ function renderTools() {
       { onclick: openPalette, 'aria-label': 'Jump to a session, project or action' },
       icon('search'),
       h('span', {}, open ? `Jump to a session, project or action` : 'Find a session to open'),
-      h('kbd', {}, 'Ctrl K'),
+      h('kbd', {}, `${MOD} K`),
     ),
     h(
       'div.bar-side.end',
@@ -1968,9 +1975,9 @@ function renderTools() {
         'div.tool-group',
         {},
         tool('Teams: sets of sessions that open together', 'team', false, (e) => teamsMenu(e.currentTarget)),
-        tool('Talk to the session in front: it listens and answers out loud  Ctrl+Shift+V', 'mic', voiceOn(), toggleVoice),
-        tool('Broadcast one prompt to several sessions  Ctrl+Shift+B', 'broadcast', S.composerOpen, toggleComposer),
-        tool('Memory and tasks  Ctrl+Shift+M', 'book', S.drawer.open, toggleDrawer),
+        tool(`Talk to the session in front: it listens and answers out loud  ${MOD}+Shift+V`, 'mic', voiceOn(), toggleVoice),
+        tool(`Broadcast one prompt to several sessions  ${MOD}+Shift+B`, 'broadcast', S.composerOpen, toggleComposer),
+        tool(`Memory and tasks  ${MOD}+Shift+M`, 'book', S.drawer.open, toggleDrawer),
         tool('Servers: run sessions on another machine', 'server', false, openServers),
         tool('Your phone: work on these sessions from the Loop app', 'phone', PH.info.phones > 0, openPhone),
       ),
@@ -2036,9 +2043,9 @@ function renderComposer() {
   if (!S.composerOpen) return;
   if (!box.firstChild) {
     const area = h('textarea', {
-      placeholder: 'Write a prompt for the selected sessions. Ctrl+Enter sends it.',
+      placeholder: `Write a prompt for the selected sessions. ${MOD}+Enter sends it.`,
       onkeydown: (e) => {
-        if (e.key === 'Enter' && e.ctrlKey) broadcast(false);
+        if (e.key === 'Enter' && modKey(e)) broadcast(false);
         if (e.key === 'Escape') toggleComposer();
       },
     });
@@ -2205,7 +2212,7 @@ function renderStatus() {
     waitingTabs().length
       ? h(
           'button.stat.ready',
-          { title: 'Sessions that finished while you were elsewhere. Click to go to the next one (Ctrl+Shift+N).', onclick: nextWaiting },
+          { title: `Sessions that finished while you were elsewhere. Click to go to the next one (${MOD}+Shift+N).`, onclick: nextWaiting },
           `${waitingTabs().length} ready for you`,
         )
       : null,
@@ -2775,12 +2782,13 @@ window.addEventListener(
       activate(S.order[Number(e.code.slice(5)) - 1]);
       return;
     }
-    if (!e.ctrlKey || e.altKey) return;
+    if (e.altKey) return;
     let handled = true;
-    if (e.key === 'Tab' && S.order.length) {
+    if (e.key === 'Tab' && e.ctrlKey && S.order.length) {
       const i = S.order.indexOf(S.active);
       activate(S.order[(i + (e.shiftKey ? -1 : 1) + S.order.length) % S.order.length]);
-    } else if (e.shiftKey && e.code === 'KeyG') setLayout(S.config.layout === 'grid' ? 'focus' : 'grid');
+    } else if (!modKey(e)) return;
+    else if (e.shiftKey && e.code === 'KeyG') setLayout(S.config.layout === 'grid' ? 'focus' : 'grid');
     else if (e.shiftKey && e.code === 'KeyV') toggleVoice();
     else if (e.shiftKey && e.code === 'KeyB') toggleComposer();
     else if (e.shiftKey && e.code === 'KeyM') toggleDrawer();

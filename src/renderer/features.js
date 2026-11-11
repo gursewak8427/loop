@@ -1,4 +1,4 @@
-/* global deck, S, h, icon, put, menu, menuAt, closeOverlay, formDialog, confirmBox, toast, save, ago */
+/* global deck, MOD, S, h, icon, put, menu, menuAt, closeOverlay, formDialog, confirmBox, toast, save, ago */
 /* global projectByDir, projectTitle, sessionTitle, tabTitle, tabFor, lampFor, wsById, wsOf, isHiddenProject, isHiddenSession */
 /* global openServers, serverShell, openPhone */
 /* global renderStatus, switchAccount, tabTitle, editAccount, */
@@ -61,14 +61,14 @@ function paletteItems() {
   items.push(
     {
       label: 'Switch between Focus and Grid',
-      hint: 'Ctrl+Shift+G',
+      hint: `${MOD}+Shift+G`,
       glyph: 'grid',
       rank: 5,
       run: () => setLayout(S.config.layout === 'grid' ? 'focus' : 'grid'),
     },
-    { label: 'Talk to this session (voice mode)', hint: 'Ctrl+Shift+V', glyph: 'mic', rank: 4, run: toggleVoice },
-    { label: 'Broadcast a prompt', hint: 'Ctrl+Shift+B', glyph: 'broadcast', rank: 4, run: toggleComposer },
-    { label: 'Memory', hint: 'Ctrl+Shift+M', glyph: 'book', rank: 3, run: toggleDrawer },
+    { label: 'Talk to this session (voice mode)', hint: `${MOD}+Shift+V`, glyph: 'mic', rank: 4, run: toggleVoice },
+    { label: 'Broadcast a prompt', hint: `${MOD}+Shift+B`, glyph: 'broadcast', rank: 4, run: toggleComposer },
+    { label: 'Memory', hint: `${MOD}+Shift+M`, glyph: 'book', rank: 3, run: toggleDrawer },
     { label: 'Claude accounts', hint: 'Add, sign in, switch', glyph: 'person', rank: 2.5, run: openAccounts },
     { label: 'Servers', hint: 'Run sessions on another machine', glyph: 'server', rank: 2.4, run: openServers },
     { label: 'Your phone', hint: 'Work on these sessions from the Loop app', glyph: 'phone', rank: 2.35, run: openPhone },
