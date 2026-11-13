@@ -45,6 +45,7 @@ const limits = require('./limits');
 const internet = require('./internet');
 const chat = require('./chat');
 const shellOf = require('./shell');
+const updater = require('./updater');
 
 if (process.env.SD_USERDATA) app.setPath('userData', process.env.SD_USERDATA);
 
@@ -749,6 +750,18 @@ function registerIpc() {
   ipcMain.handle('cloud:restore', cloudDo((id) => cloud.restore(String(id))));
   ipcMain.handle('cloud:refresh', cloudDo(() => cloud.refresh().then(() => cloud.state())));
   ipcMain.on('cloud:site', () => shell.openExternal(cloud.BASE + '/cloud'));
+
+  // Updates: see src/main/updater.js.
+  ipcMain.handle('update:state', () => updater.get());
+  ipcMain.handle('update:check', () => updater.check());
+  ipcMain.handle('update:download', () => updater.download());
+  ipcMain.on('update:auto', (_e, on) => updater.setAuto(on));
+  ipcMain.on('update:page', () => shell.openExternal(updater.get().page));
+  ipcMain.handle('update:install', () =>
+    updater.install(() => {
+      quitting = true; // no "terminals still open" question: the user said restart
+    }),
+  );
   ipcMain.handle('llm:presets', () => llms.PRESETS);
   ipcMain.handle('llm:list', () => llms.all());
   ipcMain.handle('llm:save', (_e, o) => {
@@ -1275,6 +1288,7 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
     ptys.start(); // have the terminal helper warm before the first click
     if (process.env.SD_SMOKE) smoke();
+    else updater.init({ onState: (st) => sendAll('update', st), autoDownload: config.settings.autoUpdate !== false });
     setInterval(pollLive, 2000);
     setInterval(() => {
       if (everyWindow().some((w) => w.isVisible() && !w.isMinimized())) sendAll('stats', stats.sample(app.getAppMetrics()));
@@ -1282,6 +1296,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
+    updater.stop();
     stats.stop();
     accounts.stopWatching();
     llms.stop();

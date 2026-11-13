@@ -110,7 +110,7 @@
   // Things that would happen on the PC's own screen happen here instead.
   const local = {
     openExternal: (url) => window.open(url, '_blank', 'noopener'),
-    cloudSite: () => window.open('https://loop.prismaple.com', '_blank', 'noopener'),
+    cloudSite: () => window.open('https://loop.prismaple.com/cloud', '_blank', 'noopener'),
     dropPath: () => '',
     closeWindow: () => {},
   };

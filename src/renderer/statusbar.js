@@ -1,6 +1,6 @@
 /* global deck, S, h, $, put, icon, menu, closeMenu, ago, save, toast, gb */
 /* global accountById, accountFor, accountLine, accountList, openAccounts, tabAccountMenu, isClaudeTab, tabFor, sessionTitle, waitingTabs, nextWaiting */
-/* global llmFor, llmName, brandIcon, PROVIDERS, toggleDrawer, openInternet */
+/* global llmFor, llmName, brandIcon, PROVIDERS, toggleDrawer, openInternet, confirmBox */
 // The status bar: a row of items that can be dragged into any order, on the
 // left or the right, hidden or shown again, and right-clicked for more.
 //
@@ -13,7 +13,7 @@
 
 const BAR_DEFAULT = {
   left: ['account', 'working', 'idle', 'elsewhere', 'ready'],
-  right: ['limits', 'cloud', 'cpu', 'ram', 'gpu'],
+  right: ['update', 'limits', 'cloud', 'cpu', 'ram', 'gpu'],
   hidden: [],
 };
 
@@ -97,6 +97,26 @@ const BAR_ITEMS = {
       return n ? h('button.sb-btn.sb-ready', { title: `Sessions that finished while you were elsewhere. Click for the next one (${MOD}+Shift+N).`, onclick: nextWaiting }, `${n} ready for you`) : null;
     },
     info: () => [{ info: ['Finished while you were away', String(waitingTabs().length)] }, { info: ['Next one', `${MOD}+Shift+N`] }],
+  },
+  update: {
+    name: 'Loop updates',
+    render() {
+      const u = S.update;
+      if (S.remote || !u || !u.can) return null;
+      if (u.status === 'downloading') return h('span.sb-stat.sb-update', { title: `Loop ${u.next} is downloading. You choose when to restart.` }, icon('download'), `Getting Loop ${u.next}: ${u.percent}%`);
+      if (u.status === 'available') return h('button.sb-btn.sb-update', { title: `Loop ${u.next} is out. Click to download it.`, onclick: getUpdate }, icon('download'), `Update to ${u.next}`);
+      if (u.status === 'ready') return h('button.sb-btn.sb-update.ready', { title: `Loop ${u.next} is ready. Loop restarts and opens your sessions again.`, onclick: restartToUpdate }, icon('refresh'), 'Restart to update');
+      return null;
+    },
+    info() {
+      const u = S.update || {};
+      return [
+        { info: ['This version', u.version || ''] },
+        u.next && u.status !== 'none' ? { info: ['New version', u.next] } : null,
+        { info: ['Status', updateWords(u)] },
+        u.checked ? { info: ['Last checked', `${ago(u.checked)} ago`] } : null,
+      ];
+    },
   },
   limits: {
     name: 'Plan limits',
@@ -539,6 +559,76 @@ function openLimitsCard(anchor) {
   const w = card.getBoundingClientRect();
   card.style.left = `${Math.max(8, Math.min(r.left + r.width / 2 - w.width / 2, innerWidth - w.width - 8))}px`;
   card.style.top = `${Math.max(8, r.top - w.height - 8)}px`;
+}
+
+// ---------- updates ----------
+// The work is in src/main/updater.js: it checks GitHub every few hours and
+// downloads a new version in the background. The bar shows it coming, then a
+// button that restarts Loop into it.
+
+function updateWords(u) {
+  if (!u.can) return u.why || 'Not available';
+  return (
+    {
+      checking: 'Checking…',
+      none: 'Up to date',
+      available: `Loop ${u.next} is out`,
+      downloading: `Downloading ${u.percent}%`,
+      ready: `Loop ${u.next} is ready to install`,
+      error: u.error,
+    }[u.status] || 'Up to date'
+  );
+}
+
+function wireUpdates() {
+  const take = (u) => {
+    const was = S.update && S.update.status;
+    S.update = u;
+    renderStatus();
+    if (u.status === 'ready' && was && was !== 'ready') toast(`Loop ${u.next} is ready. Click Restart to update in the status bar when it suits you.`);
+  };
+  deck.onUpdate(take);
+  deck.updateState().then(take);
+}
+
+async function getUpdate() {
+  const u = await deck.updateDownload();
+  if (u.status === 'error') toast(u.error, true);
+}
+
+// One click. If sessions are working it asks first, since a restart stops the
+// step they are on; either way they open again once the new version starts.
+async function restartToUpdate() {
+  const u = S.update;
+  if (!u || u.status !== 'ready') return;
+  const working = liveCounts().working.filter((l) => tabFor(l.sessionId)).length;
+  if (working) {
+    const ok = await confirmBox({
+      title: `Restart Loop to update to ${u.next}?`,
+      body: `${working} session${working === 1 ? ' is' : 's are'} working right now. Restarting stops the step ${working === 1 ? 'it is' : 'they are'} on; the conversation is kept, and every open session comes back when Loop opens again. Or leave it: the update goes in the next time you quit Loop.`,
+      confirm: 'Restart now',
+    });
+    if (!ok) return;
+  }
+  S.config.reopenAfterUpdate = S.config.lastOpen.length > 0;
+  save();
+  if (!(await deck.updateInstall())) toast('The update could not start. Quit Loop and it goes in then.', true);
+}
+
+async function checkForUpdates() {
+  let u = S.update || (await deck.updateState());
+  if (!u.can) {
+    toast(u.why);
+    if (/download/i.test(u.why)) deck.updatePage();
+    return;
+  }
+  if (u.status === 'ready') return restartToUpdate();
+  if (u.status === 'downloading') return toast(`Loop ${u.next} is downloading: ${u.percent}%.`);
+  u = await deck.updateCheck();
+  if (u.status === 'none') toast(`You have the newest Loop, ${u.version}.`);
+  else if (u.status === 'downloading') toast(`Loop ${u.next} is out. It is downloading; the status bar shows when it is ready.`);
+  else if (u.status === 'available') getUpdate();
+  else if (u.status === 'error') toast(u.error, true);
 }
 
 function wireLimits() {

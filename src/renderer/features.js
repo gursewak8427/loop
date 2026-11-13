@@ -1,6 +1,6 @@
 /* global deck, MOD, S, h, icon, put, menu, menuAt, closeOverlay, formDialog, confirmBox, toast, save, ago */
 /* global projectByDir, projectTitle, sessionTitle, tabTitle, tabFor, lampFor, wsById, wsOf, isHiddenProject, isHiddenSession */
-/* global openServers, serverShell, openPhone */
+/* global openServers, serverShell, openPhone, checkForUpdates */
 /* global renderStatus, switchAccount, tabTitle, editAccount, */
 /* global restartTab, llmFor, activate, formDialog, projectByDir, accountList, accountById, accountLine, multiAccount, isClaudeTab, closeTab, renderAll, renderTabs, renderList */
 /* global openSession, newSession, openShell, createTab, createTabs, activate, setLayout, toggleComposer, toggleDrawer, openSettings, focusActive, toggleVoice */
@@ -82,6 +82,7 @@ function paletteItems() {
     ...(S.switches.phone ? [{ label: 'Your phone', hint: 'Work on these sessions from the Loop app', glyph: 'phone', rank: 2.35, run: openPhone }] : []),
     { label: 'Accessible on the internet', hint: 'Open this PC from loop.prismaple.com and the phone app', glyph: 'cloud', rank: 2.3, run: openInternet },
     { label: 'Settings', hint: '', glyph: 'gear', rank: 2, run: openSettings },
+    ...(S.remote ? [] : [{ label: 'Check for updates', hint: S.update ? `Loop ${S.update.version}` : '', glyph: 'download', rank: 1.9, run: checkForUpdates }]),
   );
   return items;
 }
