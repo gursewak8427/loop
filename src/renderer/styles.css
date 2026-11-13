@@ -3624,33 +3624,32 @@ body.remote #titlebar { padding-right: 12px; }
 /* A phone's status bar: who, what is working, and the plan's rings. */
 @media (max-width: 520px) { .sb-item[data-id='ready'] { display: none; } }
 
-/* ---------- tools and environments ---------- */
+/* ---------- tools ---------- */
 .dialog.tools { display: flex; flex-direction: column; max-height: 88vh; }
-.dialog.tools .lead { color: var(--text-2); margin: 4px 0 10px; }
+.tools-head { display: flex; align-items: center; justify-content: space-between; }
+.tools-head h2 { margin: 0; }
+.tools-refresh { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--line-strong); color: var(--text-2); }
+.tools-refresh:hover { background: var(--raised); color: var(--text); }
+.tools-refresh .ic { width: 15px; height: 15px; }
+.tools-refresh.busy .ic { animation: tools-spin 0.8s linear infinite; }
+@keyframes tools-spin { to { transform: rotate(360deg); } }
+.dialog.tools .lead { color: var(--text-2); margin: 8px 0 12px; }
 .tools-scroll { overflow-y: auto; min-height: 0; padding-right: 6px; }
 .dialog.tools h3 { margin: 18px 0 8px; font-size: 12px; font-weight: 600; color: var(--text-3); }
 .dialog.tools .dim { color: var(--text-3); margin: 6px 0; }
-.env-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
-.env-tabs button { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid var(--line); color: var(--text-2); }
-.env-tabs button:hover { background: var(--raised); color: var(--text); }
-.env-tabs button.on { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); color: var(--text); font-weight: 600; }
-.env-tabs button i { font-style: normal; font-size: 11px; color: var(--text-3); }
-.env-tabs button.add { border-style: dashed; }
-.env-tabs button.add .ic { width: 12px; height: 12px; }
-.env-panel { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--well); }
-.env-tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 12px; margin-bottom: 8px; }
-.env-tool { display: flex; align-items: center; gap: 8px; padding: 4px 2px; cursor: pointer; }
-.env-acts { display: flex; gap: 8px; margin-top: 10px; }
-.dialog.tools .field.inline small { display: block; color: var(--text-3); margin-top: 2px; }
+.tools-pick select { height: 34px; font-size: 14px; }
+.tools-pick small { color: var(--text-3); }
+.tools-empty { padding: 18px; border: 1px dashed var(--line-strong); border-radius: 8px; text-align: center; }
+.tools-empty p { margin: 6px 0 0; color: var(--text-2); }
+.tools-warn { margin: 10px 0 0; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--busy) 14%, transparent); color: var(--text); }
 .tool-list { border: 1px solid var(--line); border-radius: 8px; }
 .tool-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; }
 .tool-row + .tool-row { border-top: 1px solid var(--line); }
 .tool-row .grow { flex: 1; min-width: 0; }
-.tool-row b { display: flex; align-items: center; gap: 8px; }
-.tool-row small { display: block; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 11.5px; }
-.tool-row small.bad { color: var(--danger); font-family: var(--ui); white-space: normal; }
+.tool-row small { display: block; color: var(--text-3); font-size: 12px; }
+.tool-row small.bad { color: var(--danger); }
 .tool-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
 .tool-dot.ok { background: var(--idle); }
 .tool-dot.bad { background: var(--danger); }
-.tool-tag { font-size: 11px; font-weight: 500; color: var(--text-2); border: 1px solid var(--line-strong); border-radius: 9px; padding: 0 7px; }
-.dialog.tools .actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.dialog.tools .tools-acts { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.tools-acts .grow { flex: 1; }
