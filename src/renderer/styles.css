@@ -3446,8 +3446,6 @@ body.dragging-tab .strip-grip {
 .net-test small.good { color: var(--idle); }
 .net-test small.bad { color: var(--danger); }
 .net-test .grow { flex: 1; }
-.sb-net .ic { width: 13px; height: 13px; color: var(--idle); }
-.sb-net.warn, .sb-net.warn .ic { color: var(--busy); }
 
 /* Buttons keep their words on one line wherever they sit. */
 button.btn, .mini, .sb-btn, .menu.ro-panel .ro-row b { white-space: nowrap; }
@@ -3612,3 +3610,5 @@ body.remote #titlebar { padding-right: 12px; }
 .bring-hint { color: var(--text-3); font-size: 12px; margin: 0 0 10px; }
 .bring-row.muted { opacity: 0.6; }
 .bring-keep small { white-space: normal; }
+/* A phone's status bar: who, what is working, and the plan's rings. */
+@media (max-width: 520px) { .sb-item[data-id='ready'] { display: none; } }

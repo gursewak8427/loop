@@ -184,6 +184,9 @@ function serve(req, res) {
     // The desktop page's own policy is for Electron; the browser gets this one.
     page = page.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '');
     page = page.split('../../node_modules/').join('/desk-nm/');
+    // A phone lays a page without this out 980 pixels wide and shrinks it,
+    // so the phone layout would never apply.
+    page = page.replace('<head>', '<head>\n    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />');
     page = page.replace('<script src="app.js"></script>', '<script src="/desk/remote-deck.js"></script>\n    <script src="app.js"></script>');
     res.writeHead(200, { 'content-type': TYPES['.html'], 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
     res.end(page);

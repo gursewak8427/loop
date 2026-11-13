@@ -1891,7 +1891,7 @@ function cloudRow(d, p) {
               '-',
               { label: 'Save a restorable copy now', icon: 'cloud', run: () => cloudNow() },
               { label: 'Restore a copy…', icon: 'import', run: () => cloudRestoreMenu(at.left, at.bottom + 4) },
-              { label: 'Read it at loop.prismaple.com', icon: 'book', run: () => deck.cloudSite() },
+              { label: 'Read it at loop.prismaple.com/cloud', icon: 'book', run: () => deck.cloudSite() },
               { label: 'How memory and Loop Cloud work', icon: 'book', run: () => deck.openExternal('https://loop.prismaple.com/docs/#memory') },
               '-',
               {
