@@ -40,7 +40,7 @@
     el.textContent = text + ' ';
     if (link) {
       const a = document.createElement('a');
-      a.href = 'https://loop.prismaple.com/#/machines';
+      a.href = 'https://loop.prismaple.com/cloud#/machines';
       a.textContent = 'Open it again';
       a.style.color = '#7cc4f0';
       el.append(a);

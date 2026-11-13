@@ -13,7 +13,7 @@
 
 const BAR_DEFAULT = {
   left: ['account', 'working', 'idle', 'elsewhere', 'ready'],
-  right: ['internet', 'limits', 'cloud', 'cpu', 'ram', 'gpu'],
+  right: ['limits', 'cloud', 'cpu', 'ram', 'gpu'],
   hidden: [],
 };
 
@@ -103,33 +103,16 @@ const BAR_ITEMS = {
     render: () => limitsItem(),
     info: () => limitsInfo(),
   },
-  internet: {
-    name: 'On the internet',
-    render() {
-      const n = S.internet;
-      if (!n || !n.on) return null;
-      const good = n.ready && n.steps.every((x) => x.ok);
-      return h('button.sb-btn.sb-net', { class: good ? '' : 'warn', title: good ? `Open from loop.prismaple.com or the phone app\n${n.url}` : 'Accessible on the internet: a step still needs you', onclick: () => openInternet() }, icon('cloud'), good ? 'On the internet' : 'Internet: needs a step');
-    },
-    info() {
-      const n = S.internet || {};
-      return [
-        { info: ['Accessible on the internet', n.on ? 'On' : 'Off'] },
-        n.url ? { info: ['Address', n.url.replace(/^https:\/\//, '')] } : null,
-        n.on ? { info: ['Browsers let in', String(n.viewers || 0)] } : null,
-        ...(n.steps || []).filter((x) => !x.ok).map((x) => ({ info: ['Still to do', x.label] })),
-      ];
-    },
-  },
   cloud: {
-    name: 'Loop Cloud',
+    name: 'Memory sync',
     render() {
       const c = S.cloud;
       if (!c || !c.signedIn) return null;
-      const working = { backup: 'Saving a copy…', restore: 'Restoring…', bring: 'Bringing in…', link: 'Linking…' }[c.busy];
+      const working = { backup: 'Syncing memory…', restore: 'Restoring memory…', bring: 'Bringing memory in…', link: 'Linking memory…' }[c.busy];
       const allLocal = c.defaultMode === 'local' && !Object.values(c.projects || {}).some((m) => m !== 'local');
-      const text = working || (c.error ? 'Cloud: needs a look' : allLocal ? 'Cloud off' : c.lastSync ? `Cloud · ${ago(c.lastSync) === 'now' ? 'just now' : ago(c.lastSync)}` : 'Cloud on');
-      return h('button.sb-btn.sb-cloud', { class: c.error && !working ? 'err' : '', title: c.error || `Loop Cloud: ${c.email}. Click for the memory panel.`, onclick: () => toggleDrawer() }, icon('cloud'), text);
+      const text = working || (c.error ? 'Memory: needs a look' : allLocal ? 'Memory on this PC' : 'Memory synced');
+      const when = c.lastSync ? `Last synced ${ago(c.lastSync) === 'now' ? 'just now' : `${ago(c.lastSync)} ago`}` : 'Not synced yet';
+      return h('button.sb-btn.sb-cloud', { class: c.error && !working ? 'err' : '', title: c.error || `${when}, to Loop Cloud (${c.email}). Click for the memory panel.`, onclick: () => toggleDrawer() }, icon('cloud'), text);
     },
     info() {
       const c = S.cloud || {};

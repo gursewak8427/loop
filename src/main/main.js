@@ -748,7 +748,7 @@ function registerIpc() {
   ipcMain.handle('cloud:backups', cloudDo(async () => ({ list: await cloud.backups() })));
   ipcMain.handle('cloud:restore', cloudDo((id) => cloud.restore(String(id))));
   ipcMain.handle('cloud:refresh', cloudDo(() => cloud.refresh().then(() => cloud.state())));
-  ipcMain.on('cloud:site', () => shell.openExternal(cloud.BASE));
+  ipcMain.on('cloud:site', () => shell.openExternal(cloud.BASE + '/cloud'));
   ipcMain.handle('llm:presets', () => llms.PRESETS);
   ipcMain.handle('llm:list', () => llms.all());
   ipcMain.handle('llm:save', (_e, o) => {

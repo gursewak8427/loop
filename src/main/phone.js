@@ -617,7 +617,7 @@ function answer(req, res) {
       .then((r) => {
         if (!r.ok) {
           res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-          return res.end(`<!doctype html><meta name="viewport" content="width=device-width"><body style="font:15px system-ui;background:#0e161d;color:#dce5ec;display:grid;place-items:center;height:100vh;margin:0"><div style="max-width:340px;padding:24px"><b>This PC did not open</b><p style="color:#93a6b5">${String(r.why || '').replace(/[<&>]/g, '')}</p><a style="color:#7cc4f0" href="https://loop.prismaple.com/#/machines">Back to your machines</a></div>`);
+          return res.end(`<!doctype html><meta name="viewport" content="width=device-width"><body style="font:15px system-ui;background:#0e161d;color:#dce5ec;display:grid;place-items:center;height:100vh;margin:0"><div style="max-width:340px;padding:24px"><b>This PC did not open</b><p style="color:#93a6b5">${String(r.why || '').replace(/[<&>]/g, '')}</p><a style="color:#7cc4f0" href="https://loop.prismaple.com/cloud#/machines">Back to your machines</a></div>`);
         }
         // The key travels after the #, so it never reaches a server log.
         // Into Loop's own window; the key travels after the #, so no server log sees it.
