@@ -243,9 +243,9 @@ function tabNode(g, id) {
           e.screenX > window.screenX + window.outerWidth ||
           e.screenY < window.screenY ||
           e.screenY > window.screenY + window.outerHeight;
-        if (e.dataTransfer.dropEffect === 'none' && outside && S.tabs.has(id)) popOut([id], e.screenX, e.screenY);
+        if (!S.remote && e.dataTransfer.dropEffect === 'none' && outside && S.tabs.has(id)) popOut([id], e.screenX, e.screenY);
       },
-      title: `${tabTitle(tab)}\n${p ? projectTitle(p) : ''}\n${isClaudeTab(tab) ? STATUS_WORDS[lamp] : 'Terminal'}${multiAccount() ? '\nAccount: ' + accountById(tab.account).name : ''}\n\nDrag to reorder, to split, or out of the window`,
+      title: `${tabTitle(tab)}\n${p ? projectTitle(p) : ''}\n${isClaudeTab(tab) ? STATUS_WORDS[lamp] : 'Terminal'}${multiAccount() ? '\nAccount: ' + accountById(tab.account).name : ''}\n\nDrag to reorder${S.remote ? ' or to split' : ', to split, or out of the window'}`,
       onclick: () => activate(id),
       onauxclick: (e) => e.button === 1 && closeTab(id),
       oncontextmenu: (e) => {
@@ -281,7 +281,8 @@ function tabNode(g, id) {
           '-',
           alone ? null : { label: 'Split to the right', icon: 'grid', run: () => place(id, g, 'right') },
           alone ? null : { label: 'Split below', icon: 'grid', run: () => place(id, g, 'bottom') },
-          { label: 'Move to a new window', icon: 'single', run: () => popOut([id]) },
+          // Extra windows are the PC's own; a browser has just its one page.
+          S.remote ? null : { label: 'Move to a new window', icon: 'single', run: () => popOut([id]) },
           tab.server && tab.sessionId ? '-' : null,
           tab.server && tab.sessionId ? { label: 'Stop it on the server', icon: 'x', danger: true, run: () => stopOnServer(tab) } : null,
           tab.sessionId && !tab.server ? '-' : null,
@@ -297,14 +298,15 @@ function tabNode(g, id) {
         ]);
       },
     },
-    isClaudeTab(tab) ? h('span.lamp', { class: lamp }) : icon(tab.kind === 'login' ? 'person' : 'terminal'),
+    isClaudeTab(tab) ? h('span.lamp', { class: lamp }) : tab.agent ? brandIcon(tab.agent) : icon(tab.kind === 'login' ? 'person' : 'terminal'),
     h('span.title', {}, tabTitle(tab)),
     tab.server
       ? serverChip(tab.server)
       : multiAccount() && tab.kind !== 'login'
         ? accountChip(tab.account, false, isClaudeTab(tab) ? tabAccountMenu(tab) : null)
         : null,
-    isClaudeTab(tab) ? remoteSwitch(tab) : null,
+    !tab.server && isClaudeTab(tab) && llmFor(tab.dir, tab.sessionId) ? llmChip(llmFor(tab.dir, tab.sessionId)) : null,
+    isClaudeTab(tab) && (tab.server || !llmFor(tab.dir, tab.sessionId)) ? remoteSwitch(tab) : null,
     h(
       'button.x',
       {
@@ -539,6 +541,7 @@ function detachTab(id) {
 }
 
 async function popOut(ids, x, y) {
+  if (S.remote) return;
   const specs = ids.filter((id) => S.tabs.has(id)).map((id) => specOf(S.tabs.get(id)));
   if (!specs.length) return;
   if (S.child && specs.length === S.tabs.size) return toast('This window already holds only that terminal. Drag it onto another window to move it.');

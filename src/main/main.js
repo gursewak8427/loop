@@ -1,13 +1,33 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Menu, Tray, nativeImage, safeStorage, powerSaveBlocker } = require('electron');
+// Loop's window in a browser answers through the same handlers: they are noted
+// as they are registered, so this comes before any of them.
+const remoteDesk = require('./remote-desk');
+remoteDesk.capture(ipcMain);
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { scanProjects, readLive, isClaudePid, peek, CLAUDE_DIR: CLAUDE_DIR_FOR_TOKENS } = require('./scanner');
+const { scanProjects, readLive, isClaudePid, peek, resolveProjectPath: scannerResolvePath, CLAUDE_DIR: CLAUDE_DIR_FOR_TOKENS } = require('./scanner');
+const scannerResolve = (dir) => scannerResolvePath(dir, []);
+
+// The git remote of a project folder, read from its own config.
+function gitRemoteOf(projPath) {
+  try {
+    const t = fs.readFileSync(path.join(String(projPath || ''), '.git', 'config'), 'utf8');
+    const origin = /\[remote "origin"\]([^[]*)/.exec(t);
+    const u = /\burl\s*=\s*(\S+)/.exec((origin && origin[1]) || t);
+    return u ? u[1] : '';
+  } catch {
+    return '';
+  }
+}
 const trash = require('./trash');
 const ptys = require('./ptys');
 const memory = require('./memory');
 const subs = require('./subs');
 const accounts = require('./accounts');
+const llms = require('./llms');
+const agents = require('./agents');
+const memoryImport = require('./memory-import');
 const stats = require('./stats');
 const remote = require('./remote');
 const servers = require('./servers');
@@ -19,6 +39,11 @@ const direct = require('./direct');
 const relay = require('./relay');
 const localTools = require('./localtools');
 const whatsapp = require('./whatsapp');
+const switches = require('./switches');
+const cloud = require('./cloud');
+const limits = require('./limits');
+const internet = require('./internet');
+const chat = require('./chat');
 const shellOf = require('./shell');
 
 if (process.env.SD_USERDATA) app.setPath('userData', process.env.SD_USERDATA);
@@ -84,7 +109,10 @@ const waiting = new Map(); // request id -> resolve, for questions put to a wind
 let askSeq = 0;
 
 const everyWindow = () => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
-const sendAll = (channel, ...args) => everyWindow().forEach((w) => w.webContents.send(channel, ...args));
+const sendAll = (channel, ...args) => {
+  everyWindow().forEach((w) => w.webContents.send(channel, ...args));
+  remoteDesk.broadcast(channel, ...args); // and Loop open in a browser elsewhere
+};
 
 // Ask a window something and wait for its answer (null if it does not answer in time).
 function ask(wc, channel, ...args) {
@@ -186,6 +214,19 @@ function loadConfig() {
     defaultAccount: 'default',
     projectAccount: {},
     sessionAccount: {},
+    // session, or project folder -> a model that is not Claude; see llms.js
+    sessionLlm: {},
+    sessionModel: {}, // session id -> the model it runs on ('' is the account's default)
+    projectLlm: {},
+    // Loop's own id -> a session of another agent (Codex, Grok ...); see agents.js
+    agentSessions: {},
+    // logins added for an agent beside its main one: [{ id, agent, name, color }]
+    agentAccounts: [],
+    // agent -> the account its new sessions use
+    agentDefault: {},
+    // set once the agents' own memories were brought into Loop's (or the user
+    // chose to start fresh); from then on, each agent's own memory is off in Loop
+    memoryMoved: 0,
     sessionRemote: {},
     servers: [],
     phone: { on: false, port: phone.PORT, token: '' },
@@ -272,6 +313,17 @@ const waWaits = new Map(); // request id -> whether the window delivered a Whats
 // The phone bridge keeps its token and port in the config the window owns, so it
 // is set up again whenever that config changes.
 function syncPhone() {
+  // Phone pairing is switched off; the bridge still runs when this machine is
+  // accessible on the internet, which opens it only through Loop Cloud.
+  if (!switches.phone) {
+    relay.stop();
+    const want = phone.sync({ ...config.phone, on: internet.isOn() });
+    if (want.token !== (config.phone || {}).token) {
+      config.phone = { ...config.phone, token: want.token };
+      saveConfigSoon();
+    }
+    return;
+  }
   const want = phone.sync(config.phone);
   if (JSON.stringify(want) !== JSON.stringify(config.phone)) {
     config.phone = want;
@@ -418,8 +470,11 @@ function registerIpc() {
       memoryWarning,
       winBuild: Number(os.release().split('.')[2]) || 19045,
       winId: e.sender.id,
-      child: Boolean(win) && e.sender !== win.webContents,
+      // A browser elsewhere is a whole window, not a side window.
+      child: Boolean(win) && e.sender !== win.webContents && !e.sender.loopRemote,
+      remote: Boolean(e.sender.loopRemote),
       adopt: pendingAdopt.get(e.sender.id) || [],
+      switches,
     };
   });
   ipcMain.handle('scan', () => scanProjects());
@@ -427,7 +482,7 @@ function registerIpc() {
     const own = win && e.sender === win.webContents ? {} : Object.fromEntries(WINDOW_KEYS.map((k) => [k, config[k]]));
     config = { ...next, ...own, window: config.window, settings: { ...DEFAULT_SETTINGS, ...(next.settings || {}) } };
     saveConfigSoon();
-    servers.sync(config.servers);
+    if (switches.servers) servers.sync(config.servers);
     syncPhone();
     for (const w of everyWindow()) if (w.webContents !== e.sender) w.webContents.send('config', config);
   });
@@ -477,6 +532,35 @@ function registerIpc() {
 
   ipcMain.handle('pty:open', async (e, o) => {
     delete o.remoteCommand;
+    delete o.agentCommand;
+    // Another agent, signed in with its own plan: its own program, built here from fixed parts.
+    if (o.kind === 'agent' || o.kind === 'agentLogin' || o.kind === 'agentInstall') {
+      try {
+        // The model chosen for this session, kept with its record.
+        const rec = (config.agentSessions || {})[String(o.agentSession || '')];
+        o.model = rec && rec.agent === o.agent ? String(rec.model || '') : '';
+        const agentCommand = agents.command(o);
+        if (o.kind !== 'agent') o.cwd = os.homedir();
+        else if (!o.cwd || !fs.statSync(o.cwd).isDirectory()) throw new Error(`The project folder no longer exists: ${o.cwd || 'unknown'}`);
+        // Which login it runs as: the main one, or one Loop added and still lists.
+        const account = String(o.agentAccount || 'default');
+        if (account !== 'default' && !(config.agentAccounts || []).some((a) => a.agent === o.agent && a.id === account)) throw new Error('That account was removed. Choose another one.');
+        let command = agentCommand;
+        if (o.kind === 'agent' && o.agent === 'codex' && config.settings.memoryEnabled !== false) {
+          const url = memory.urlFor(String(o.dir || ''), String(o.memberId || ''));
+          if (url) {
+            await memory.listAll(String(o.dir)).catch(() => []);
+            // Plain words only: the line goes through cmd, which acts on these.
+            const brief = memory.ownerBrief(String(o.dir), String(o.memberId)).replace(/["%!^&|<>\r\n]/g, ' ').slice(0, 2400);
+            command = command.replace(/^codex\b/, `codex -c mcp_servers.loop_memory.url=${url} -c "developer_instructions=${brief}"`);
+          }
+        }
+        ptys.open(e.sender, { ...o, server: null, agentCommand: command }, config.settings, null, o.kind === 'agentInstall' ? {} : agents.envFor(o.agent, account));
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    }
     if (o.server) {
       // A tab on a server is an SSH connection from this PC; Claude Code runs over there.
       const server = servers.get(o.server);
@@ -519,15 +603,24 @@ function registerIpc() {
       // Claude Code reconnects it on every resume, under whichever account is signed in.
       // The switch on the tab decides. On: start connected. Off: delete whatever copy
       // is still on claude.ai and close the marker before Claude Code can act on it.
-      o.remote = isClaude && Boolean((config.sessionRemote || {})[o.sessionId]);
+      // Remote Control is claude.ai's, so it cannot carry a session on another model.
+      const llm = isClaude ? llms.pick(config, o.dir, o.sessionId) : '';
+      // On a plan, the model chosen for the session; on an API key, the key's own model.
+      o.model = isClaude && !llm ? String((config.sessionModel || {})[o.sessionId] || '') : '';
+      o.remote = isClaude && !llm && Boolean((config.sessionRemote || {})[o.sessionId]);
       if (isClaude && !o.remote && o.kind === 'resume' && !liveNow.some((l) => l.sessionId === o.sessionId)) {
         await remote.forget(o.dir, o.sessionId, allAccounts(o.account)).catch(() => {});
       }
       // A team member starts knowing the team as Loop has it now, not as it remembers it.
       delete o.teamBrief;
       if (wantsMemory) o.teamBrief = memory.startBrief(o.dir, o.sessionId);
+      const loopOwns = wantsMemory && Boolean(config.memoryMoved);
+      if (loopOwns) {
+        await memory.listAll(o.dir).catch(() => []);
+        o.teamBrief = [memory.ownerBrief(o.dir, o.sessionId), o.teamBrief].filter(Boolean).join(' ');
+      }
       delete o.gate; // Loop asks no permission of its own: Claude Code handles that
-      const env = { ...accounts.envFor(o.account), ...(isClaude ? viewEnv() : {}) };
+      const env = { ...accounts.envFor(o.account), ...(isClaude ? viewEnv() : {}), ...llms.envFor(llm), ...(loopOwns ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}) };
       // Right after login the tools on this PC may still be starting; a session that beats them keeps them red.
       if (isClaude) await localTools.ready(env, o.cwd);
       ptys.open(e.sender, o, config.settings, wantsMemory ? memory.configFor(o.dir, o.sessionId) : null, env);
@@ -540,6 +633,134 @@ function registerIpc() {
   ipcMain.on('pty:resize', (_e, id, cols, rows) => ptys.resize(id, cols, rows));
   ipcMain.on('pty:flow', (_e, id, hold) => ptys.flow(id, hold));
   ipcMain.on('pty:kill', (_e, id, force) => ptys.kill(String(id), Boolean(force)));
+
+  // Models that are not Claude. The key comes in and is never sent back out.
+  ipcMain.handle('agent:list', () => agents.statusAll(config.agentAccounts || []));
+  ipcMain.handle('agent:removeAccount', async (_e, agent, account) => {
+    try {
+      if (ptys.usingAgentAccount && ptys.usingAgentAccount(String(agent), String(account))) return { ok: false, error: 'Close the sessions that use this account first.' };
+      await new Promise((resolve) => {
+        const r = require('child_process').spawn(agents.get(String(agent)).exe, ['logout'], { env: { ...process.env, ...agents.envFor(String(agent), String(account)) }, shell: process.platform === 'win32', windowsHide: true });
+        r.on('exit', resolve);
+        r.on('error', resolve);
+        setTimeout(resolve, 15000);
+      });
+      agents.removeAccount(String(agent), String(account));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('agent:find', (_e, o) => {
+    try {
+      return agents.findNative(String(o.agent), String(o.cwd), Number(o.since) || 0);
+    } catch {
+      return '';
+    }
+  });
+  ipcMain.handle('agent:turns', (_e, o) => {
+    try {
+      return agents.turns(String(o.agent), String(o.native));
+    } catch {
+      return [];
+    }
+  });
+  ipcMain.handle('agent:model', (_e, o) => {
+    try {
+      return agents.modelOf(String(o.agent), String(o.native));
+    } catch {
+      return '';
+    }
+  });
+  // Loop Cloud: each answers { ok, ... } or { ok: false, text } for the window to show.
+  const cloudDo = (fn) => async (_e, ...args) => {
+    try {
+      return { ok: true, ...((await fn(...args)) || {}) };
+    } catch (err) {
+      return { ok: false, text: err.message };
+    }
+  };
+  ipcMain.handle('limits:get', (_e, o) => limits.get(String((o && o.agent) || ''), String((o && o.account) || 'default')).catch(() => null));
+  // The chat view: a session's conversation, a little at a time.
+  ipcMain.handle('chat:read', (_e, o) => chat.read(String((o && o.dir) || ''), String((o && o.sessionId) || ''), Number(o && o.from)).catch(() => ({ size: 0, items: [] })));
+  ipcMain.handle('chat:upload', (_e, o) => chat.upload(phone.uploadDir(), o));
+  ipcMain.handle('chat:uploadPart', (_e, o) => chat.uploadPart(phone.uploadDir(), o));
+  ipcMain.handle('chat:discard', (_e, file) => chat.discard(phone.uploadDir(), file));
+  ipcMain.handle('chat:picture', (_e, file) => chat.picture(phone.uploadDir(), file));
+  ipcMain.handle('session:rename', (_e, o) => chat.rename(String((o && o.dir) || ''), String((o && o.sessionId) || ''), String((o && o.name) || '')).catch(() => false));
+  ipcMain.handle('internet:state', () => internet.check());
+  ipcMain.handle('internet:set', cloudDo((on) => internet.setOn(Boolean(on))));
+  ipcMain.handle('internet:act', cloudDo((key) => internet.act(String(key || ''))));
+  ipcMain.handle('internet:test', cloudDo(() => internet.test()));
+  ipcMain.handle('cloud:state', () => cloud.state());
+  // What the cloud holds, matched to the projects on this machine.
+  ipcMain.handle(
+    'cloud:projects',
+    cloudDo(async (fresh) => {
+      const [held, projects] = await Promise.all([cloud.cloudProjects(Boolean(fresh)), scanProjects()]);
+      const locals = projects
+        .filter((p) => !p.server && p.exists)
+        .map((p) => {
+          const mem = memory.projectFolderSync(p.dir);
+          return { dir: p.dir, name: p.name || path.basename(p.path || '') || p.dir, remote: gitRemoteOf(p.path), folder: mem ? path.basename(mem) : '' };
+        });
+      const cs = cloud.state();
+      const modeOf = (d) => cs.projects[d] || cs.defaultMode;
+      // linked: this cloud project is already this machine's project's memory, kept in step.
+      const matched = cloud.matchProjects(held.list, locals).map((c) => ({ ...c, fresh: c.match ? !memory.projectFolderSync(c.match.dir) : false, linked: Boolean(c.match && c.match.how === 'linked' && modeOf(c.match.dir) === 'linked') }));
+      return { projects: matched, companyNotes: held.companyNotes, locals: locals.map((l) => ({ dir: l.dir, name: l.name, folder: l.folder, mode: modeOf(l.dir) })) };
+    }),
+  );
+  ipcMain.handle(
+    'cloud:bring',
+    cloudDo(async (o) => {
+      const out = await cloud.bringIn((o && o.items) || [], Boolean(o && o.company));
+      for (const it of (o && o.items) || []) await memory.rebuildIndexes(String(it.dir || '')).catch(() => {});
+      return out;
+    }),
+  );
+  ipcMain.handle('cloud:notes', cloudDo((o) => cloud.cloudNotes(String((o && o.folder) || ''), String((o && o.dir) || ''))));
+  ipcMain.handle(
+    'cloud:bringNotes',
+    cloudDo(async (o) => {
+      const out = await cloud.bringNotes(String((o && o.folder) || ''), String((o && o.dir) || ''), (o && o.rels) || []);
+      await memory.rebuildIndexes(String((o && o.dir) || '')).catch(() => {});
+      return out;
+    }),
+  );
+  ipcMain.handle('cloud:code', cloudDo((email) => cloud.sendCode(String(email || ''))));
+  ipcMain.handle('cloud:verify', cloudDo((email, code) => cloud.verify(String(email || ''), String(code || ''))));
+  ipcMain.handle('cloud:signOut', cloudDo(() => cloud.signOut()));
+  ipcMain.handle('cloud:mode', cloudDo((mode) => cloud.setMode(String(mode))));
+  // Each project's own setting: local, backup or linked.
+  ipcMain.handle('cloud:projectMode', cloudDo((dir, mode) => cloud.setProjectMode(String(dir || ''), String(mode || ''))));
+  ipcMain.handle('cloud:defaultMode', cloudDo((mode) => cloud.setDefaultMode(String(mode || ''))));
+  ipcMain.handle(
+    'cloud:link',
+    cloudDo(async (dir, folder) => {
+      const out = await cloud.link(String(dir || ''), String(folder || ''));
+      await memory.rebuildIndexes(String(dir || '')).catch(() => {});
+      return out;
+    }),
+  );
+  ipcMain.handle('cloud:sync', cloudDo(() => cloud.syncNow()));
+  ipcMain.handle('cloud:backup', cloudDo(() => cloud.backupNow()));
+  ipcMain.handle('cloud:backups', cloudDo(async () => ({ list: await cloud.backups() })));
+  ipcMain.handle('cloud:restore', cloudDo((id) => cloud.restore(String(id))));
+  ipcMain.handle('cloud:refresh', cloudDo(() => cloud.refresh().then(() => cloud.state())));
+  ipcMain.on('cloud:site', () => shell.openExternal(cloud.BASE));
+  ipcMain.handle('llm:presets', () => llms.PRESETS);
+  ipcMain.handle('llm:list', () => llms.all());
+  ipcMain.handle('llm:save', (_e, o) => {
+    try {
+      return { ok: true, llm: llms.save(o || {}) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('llm:remove', (_e, id) => llms.remove(String(id)));
+  ipcMain.handle('llm:models', (_e, o) => llms.models(o || {}));
+  ipcMain.handle('llm:check', (_e, o) => llms.check(o || {}));
 
   ipcMain.handle('acct:status', (_e, ids) =>
     Promise.all(
@@ -562,6 +783,17 @@ function registerIpc() {
   });
 
   ipcMain.handle('mem:list', (_e, { dir, scope }) => memory.list(dir, scope));
+  // Each agent's own memory files for one project, and copying the chosen ones into Loop's.
+  // `where` is the project's folder, which only the window's project list knows; it is only read from.
+  const folderOk = (where) => {
+    try {
+      return where && fs.statSync(String(where)).isDirectory() ? String(where) : '';
+    } catch {
+      return '';
+    }
+  };
+  ipcMain.handle('mem:importList', (_e, { dir, path: where }) => memoryImport.list(String(dir), folderOk(where)));
+  ipcMain.handle('mem:import', (_e, { dir, path: where, ids }) => memoryImport.bring(String(dir), folderOk(where), (ids || []).map(String)));
   ipcMain.handle('mem:search', (_e, { dir, scope, query }) => memory.search(dir, scope, query));
   ipcMain.handle('mem:save', (_e, note) => memory.saveNote(note));
   ipcMain.handle('mem:delete', (_e, ref) => memory.removeNote(ref));
@@ -656,7 +888,15 @@ function registerIpc() {
     if (!(config.sessionRemote || {})[o.sessionId] && !direct.list().includes(String(o.sessionId))) {
       await remote.forget(o.dir, String(o.sessionId), allAccounts(account)).catch(() => {});
     }
-    const env = { ...accounts.envFor(account), ...viewEnv() };
+    const llm = llms.pick(config, o.dir, String(o.sessionId));
+    const loopOwns = config.settings.memoryEnabled !== false && Boolean(config.memoryMoved);
+    if (loopOwns) await memory.listAll(String(o.dir)).catch(() => []);
+    let env;
+    try {
+      env = { ...accounts.envFor(account), ...viewEnv(), ...llms.envFor(llm), ...(loopOwns ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}) };
+    } catch (err) {
+      return err.message;
+    }
     if (!direct.list().includes(String(o.sessionId))) await localTools.ready(env, o.cwd);
     return direct.send({
       sessionId: String(o.sessionId),
@@ -666,10 +906,10 @@ function registerIpc() {
       // A session Loop has never run before: start it rather than resume it.
       fresh: Boolean(o.fresh),
       // The switch decides here too: on starts it connected to claude.ai.
-      remote: Boolean((config.sessionRemote || {})[o.sessionId]),
+      remote: !llm && Boolean((config.sessionRemote || {})[o.sessionId]),
       settings: config.settings,
       mcpConfig: config.settings.memoryEnabled !== false ? memory.configFor(o.dir, o.sessionId) : null,
-      brief: config.settings.memoryEnabled !== false ? memory.startBrief(o.dir, o.sessionId) : '',
+      brief: config.settings.memoryEnabled !== false ? [loopOwns ? memory.ownerBrief(String(o.dir), String(o.sessionId)) : '', memory.startBrief(o.dir, o.sessionId)].filter(Boolean).join(' ') : '',
       env,
     });
   });
@@ -711,6 +951,7 @@ function registerIpc() {
     if (!o || !o.cwd) return { ok: false, text: 'That session has nowhere to run.' };
     if (o.server) return { ok: false, text: 'Usage and context are shown for sessions on this PC.' };
     const account = knownAccount(o.account) ? o.account : 'default';
+    if (llms.pick(config, o.dir, String(o.sessionId || ''))) return { ok: false, text: 'Usage is shown by the provider of the model this session runs on.' };
     return direct.info({ what: String(o.what), sessionId: String(o.sessionId || ''), cwd: String(o.cwd), settings: config.settings, env: accounts.envFor(account) });
   });
   ipcMain.handle('direct:stop', (_e, sessionId) => direct.stop(String(sessionId)));
@@ -769,15 +1010,59 @@ function registerIpc() {
   ipcMain.on('attention', () => {
     if (win && !win.isFocused()) win.flashFrame(true);
   });
-  ipcMain.on('mem:reveal', (_e, dir) => {
-    const folder = path.join(memory.root(), String(dir).replace(/[^A-Za-z0-9_-]/g, ''));
-    fs.mkdirSync(folder, { recursive: true });
-    shell.openPath(folder);
+  // Where one scope's notes are, to show it and to open it.
+  ipcMain.handle('mem:folder', async (_e, { dir, scope }) => {
+    try {
+      return await memory.scopeFolder(String(dir), String(scope));
+    } catch {
+      return memory.root();
+    }
+  });
+  ipcMain.on('mem:open', async (_e, { dir, scope }) => {
+    let where = memory.root();
+    try {
+      where = await memory.scopeFolder(String(dir), String(scope));
+      fs.mkdirSync(where, { recursive: true });
+    } catch {
+      // the whole folder, then
+    }
+    shell.openPath(where);
+  });
+  // Memory as a zip: one session, the project (shared notes, every session, the board), or all of it.
+  ipcMain.handle('mem:export', async (e, { dir, scope, name }) => {
+    try {
+      const what = String(scope);
+      const folder = what === 'all' ? memory.root() : what === 'project' ? await memory.projectFolder(String(dir)) : await memory.scopeFolder(String(dir), what);
+      if (!fs.existsSync(folder)) return { ok: false, text: 'There is no memory there to export yet.' };
+      const day = new Date().toISOString().slice(0, 10);
+      const label = String(name || 'memory').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'memory';
+      const pick = await dialog.showSaveDialog(BrowserWindow.fromWebContents(e.sender), {
+        title: 'Export memory',
+        defaultPath: path.join(app.getPath('documents'), `loop-memory-${label}-${day}.zip`),
+        filters: [{ name: 'Zip', extensions: ['zip'] }],
+      });
+      if (pick.canceled || !pick.filePath) return { ok: false, canceled: true };
+      // Windows' own tar writes zip files; backups of old layouts stay out.
+      await new Promise((resolve, reject) =>
+        require('child_process').execFile(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-a', '-c', '-f', pick.filePath, '--exclude', '.backup-*', '-C', folder, '.'], { windowsHide: true, timeout: 120000 }, (err) => (err ? reject(err) : resolve())),
+      );
+      return { ok: true, file: pick.filePath };
+    } catch (err) {
+      return { ok: false, text: `Could not export: ${err.message}` };
+    }
+  });
+  ipcMain.on('mem:reveal', async (_e, dir) => {
+    try {
+      shell.openPath(await memory.projectFolder(String(dir)));
+    } catch {
+      shell.openPath(memory.root());
+    }
   });
 
   ipcMain.handle('clip:read', () => clipboard.readText());
   ipcMain.on('clip:write', (_e, text) => clipboard.writeText(String(text)));
   ipcMain.on('shell:reveal', (_e, p) => shell.openPath(String(p)));
+  ipcMain.on('shell:show', (_e, p) => shell.showItemInFolder(String(p)));
   ipcMain.on('shell:external', (_e, url) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
   });
@@ -901,6 +1186,10 @@ if (!app.requestSingleInstanceLock()) {
       whatsapp.moved(from, to);
     });
     phone.setHooks({
+      openTicket: (ticket) => internet.openTicket(ticket),
+      deskServe: (req, res) => remoteDesk.serve(req, res),
+      deskAttach: (ws) => remoteDesk.attach(ws),
+      visitorOk: (key) => internet.visitorOk(key),
       toWindow: (channel, payload) => {
         if (!win || win.isDestroyed()) return false;
         if (channel !== 'phone:ping') win.webContents.send(channel, payload);
@@ -917,8 +1206,57 @@ if (!app.requestSingleInstanceLock()) {
         return p;
       },
     });
+    memory.setProjectNamer(async (dir) => {
+      const where = await scannerResolve(dir).catch(() => null);
+      return where ? path.basename(where) : '';
+    });
+    memory.setSessionNamer((id) => {
+      const agentRec = Object.values(config.agentSessions || {}).find((r) => r.memberId === id);
+      // The name the user gave it, its name in the team, or the first words of its role.
+      const teamName = Object.values(config.projectTeam || {})
+        .map((t) => (t.names || {})[id])
+        .find(Boolean);
+      const role = String((config.sessionRole || {})[id] || '').split(/\s+/).slice(0, 3).join(' ');
+      return (config.sessionAlias || {})[id] || teamName || (agentRec && agentRec.name) || role || '';
+    });
+    memory.setRemoteLookup(async (dir) => {
+      const where = await scannerResolve(dir).catch(() => null);
+      return where ? gitRemoteOf(where) : '';
+    });
     memoryWarning = await memory.init(app.getPath('userData'), config.settings.memoryDir);
     accounts.init(app.getPath('userData'));
+    agents.init(app.getPath('userData'));
+    llms.init(app.getPath('userData'), {
+      encrypt: (text) => safeStorage.encryptString(text).toString('base64'),
+      decrypt: (b64) => safeStorage.decryptString(Buffer.from(b64, 'base64')),
+    });
+    limits.init({ file: path.join(app.getPath('userData'), 'limits.json'), claudeHome: (account) => accounts.homeOf(account).dir, claudeJson: (account) => accounts.homeOf(account).json, codexHome: (account) => agents.homeOf('codex', account) });
+    cloud.init(app.getPath('userData'), {
+      encrypt: (text) => safeStorage.encryptString(text).toString('base64'),
+      decrypt: (b64) => safeStorage.decryptString(Buffer.from(b64, 'base64')),
+      root: () => memory.root(),
+      onChange: (s) => sendAll('cloud', s),
+      afterPull: () => memory.forget(),
+    });
+    remoteDesk.init({
+      renderer: path.join(__dirname, '..', 'renderer'),
+      nodeModules: path.join(__dirname, '..', '..', 'node_modules'),
+      preload: path.join(__dirname, 'preload.js'),
+      // A browser that went away leaves its sessions running here, held for the next window.
+      onGone: (sender) => {
+        for (const id of ptys.ownedBy(sender)) ptys.hold(id);
+      },
+    });
+    internet.init(app.getPath('userData'), {
+      cloud,
+      shell,
+      powerSaveBlocker,
+      phonePort: () => Number((config.phone || {}).port) || phone.PORT,
+      phoneOn: () => syncPhone(),
+      onChange: (s) => sendAll('internet', s),
+    });
+    // Claude sessions do not need this, so Loop opens whether or not it starts.
+    await llms.start().catch((err) => console.error('Could not start the model bridge:', err.message));
     trash.init(app.getPath('userData'));
     accounts.watchConnectors(); // connector sign-ins are the same under every account
     // A server reports every few seconds; pass on only what changed.
@@ -931,7 +1269,7 @@ if (!app.requestSingleInstanceLock()) {
       sendAll('servers', snap);
       pollLive();
     });
-    servers.sync(config.servers);
+    if (switches.servers) servers.sync(config.servers);
     syncPhone();
     registerIpc();
     createWindow();
@@ -946,10 +1284,13 @@ if (!app.requestSingleInstanceLock()) {
   app.on('will-quit', () => {
     stats.stop();
     accounts.stopWatching();
+    llms.stop();
     servers.stopAll();
     phone.stop();
     direct.stopAll();
     relay.stop();
     whatsapp.stop();
+    cloud.stop();
+    internet.stop();
   });
 }

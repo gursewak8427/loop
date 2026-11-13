@@ -42,6 +42,11 @@ class _PairPageState extends State<PairPage> {
       RegExp(r'[&#]d=([A-Za-z0-9_.:-]+)').firstMatch(_frag)?.group(1) ?? '';
   static final _told = _relayKey.isEmpty ? _frag.split('/').first.trim() : '';
 
+  /// Opened from Loop Cloud: the PC handed this browser a key of its own,
+  /// after the #, so nothing is left to type.
+  static final _visitor =
+      RegExp(r'[/&]v=([a-f0-9]{64})').firstMatch(_frag)?.group(1) ?? '';
+
   /// A build made for hosting elsewhere says so; Loop's own copy does not.
   static const _hosted = bool.fromEnvironment('LOOP_HOSTED');
   static final _loopServed =
@@ -68,9 +73,17 @@ class _PairPageState extends State<PairPage> {
         ? _toldPort
         : (_https ? '8788' : '8787'),
   );
-  final _code = TextEditingController();
+  final _code = TextEditingController(text: _visitor);
   bool _trying = false;
   String _problem = '';
+
+  @override
+  void initState() {
+    super.initState();
+    if (_visitor.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _pair());
+    }
+  }
 
   @override
   void dispose() {

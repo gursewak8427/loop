@@ -30,6 +30,8 @@ const newCode = () =>
     )
     .join('-');
 const MAX_IMAGE = 12 * 1024 * 1024; // one screenshot, not a film
+// One message on the socket: a chat attachment of up to 20 MB, as base64.
+const MAX_WS = 30 * 1024 * 1024;
 
 let server = null;
 let wss = null;
@@ -84,6 +86,10 @@ let hooks = {
   remoteRead: async () => null, // (server, dir, sessionId, from) -> { size, text }
   remoteTail: async () => null, // (server, file) -> { text, cut } for one task's output
   toServer: async () => null, // (server, file, onProgress) -> the path it has there
+  openTicket: async () => ({ ok: false, why: 'Remote access is off.' }), // (ticket) -> { ok, key, host }
+  visitorOk: () => false, // (key) -> may this browser in
+  deskServe: () => false, // (req, res) -> served Loop's window files
+  deskAttach: () => false, // (ws) -> the connection now carries Loop's window
 };
 
 // Pictures arrive in pieces, each one answered, so the phone can show how far
@@ -151,8 +157,25 @@ function handle(c, raw) {
     return;
   }
   if (!m || typeof m.t !== 'string') return;
+  // Loop's own window in a browser: the same key, then the connection is the window's.
+  if (m.t === 'desk' && !c.paired && !c.desk) {
+    if (!hooks.visitorOk(String(m.key || '').trim().toLowerCase())) {
+      setTimeout(() => {
+        send(c, { t: 'desk-denied' });
+        c.ws.close();
+      }, 1000);
+      return;
+    }
+    c.desk = true;
+    clients.delete(c.id);
+    hooks.deskAttach(c.ws);
+    return;
+  }
+  if (c.desk) return;
   if (m.t === 'hello') {
-    if (!sameToken(String(m.token || '').trim().toLowerCase(), token)) {
+    const said = String(m.token || '').trim().toLowerCase();
+    // The pairing code, or a key a browser got by opening this PC from Loop Cloud.
+    if (!sameToken(said, token) && !hooks.visitorOk(said)) {
       setTimeout(() => {
         send(c, { t: 'denied', why: 'That pairing code is not the one Loop is showing. Check it on the PC.' });
         c.ws.close();
@@ -308,9 +331,10 @@ function saveImage(m) {
   }
 }
 
-// Pictures sent from a phone are kept for a day, long enough for the session to read them.
+// Pictures and files sent from the chat or a phone are kept two weeks: the
+// session reads them at once, and the chat shows them again when scrolled back.
 function purgeUploads() {
-  const cut = Date.now() - 24 * 60 * 60 * 1000;
+  const cut = Date.now() - 14 * 24 * 60 * 60 * 1000;
   for (const name of fs.readdirSync(uploads)) {
     const p = path.join(uploads, name);
     try {
@@ -521,7 +545,7 @@ async function startSecure(plainPort) {
   try {
     const opts = { cert: fs.readFileSync(where.crt), key: fs.readFileSync(where.key) };
     const s = https.createServer(opts, (req, res) => answer(req, res));
-    const w = new WebSocketServer({ server: s, path: '/ws', maxPayload: MAX_IMAGE + 2e6, perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 4, memLevel: 7 }, concurrencyLimit: 4 } });
+    const w = new WebSocketServer({ server: s, path: '/ws', maxPayload: MAX_WS, perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 4, memLevel: 7 }, concurrencyLimit: 4 } });
     w.on('connection', welcome);
     s.on('error', (e) => {
       secureWhy = e.code === 'EADDRINUSE' ? `Port ${want} is already in use.` : e.message;
@@ -548,7 +572,7 @@ function welcome(ws, req) {
   const c = { id: ++clientSeq, ws, paired: false, subscribed: false, at: Date.now(), ip: (req.socket.remoteAddress || '').replace(/^::ffff:/, '') };
   clients.set(c.id, c);
   // A connection that never pairs is dropped, so a stray scanner cannot sit there.
-  const bounce = setTimeout(() => !c.paired && ws.close(), 10000);
+  const bounce = setTimeout(() => !c.paired && !c.desk && ws.close(), 10000);
   ws.on('message', (data) => handle(c, data));
   c.alive = true;
   ws.on('pong', () => (c.alive = true));
@@ -578,6 +602,34 @@ function answer(req, res) {
     });
     return res.end();
   }
+  // Opened from Loop Cloud: a one-time ticket, checked with the cloud, swapped
+  // for this browser's own key, and on into the app already paired.
+  const route = (req.url || '').split('?')[0];
+  if (hooks.deskServe(req, res)) return;
+  if (route === '/loop-remote/ping') {
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    return res.end(JSON.stringify({ app: 'Loop', host: os.hostname() }));
+  }
+  if (route === '/loop-remote/open') {
+    const ticket = new URLSearchParams((req.url || '').split('?')[1] || '').get('ticket') || '';
+    hooks
+      .openTicket(ticket)
+      .then((r) => {
+        if (!r.ok) {
+          res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+          return res.end(`<!doctype html><meta name="viewport" content="width=device-width"><body style="font:15px system-ui;background:#0e161d;color:#dce5ec;display:grid;place-items:center;height:100vh;margin:0"><div style="max-width:340px;padding:24px"><b>This PC did not open</b><p style="color:#93a6b5">${String(r.why || '').replace(/[<&>]/g, '')}</p><a style="color:#7cc4f0" href="https://loop.prismaple.com/#/machines">Back to your machines</a></div>`);
+        }
+        // The key travels after the #, so it never reaches a server log.
+        // Into Loop's own window; the key travels after the #, so no server log sees it.
+        res.writeHead(302, { location: `/desk/#k=${r.key}`, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+        res.end();
+      })
+      .catch(() => {
+        res.writeHead(500);
+        res.end();
+      });
+    return;
+  }
   // Enough for the app to check it has the right address before pairing, and
   // for a page served elsewhere to ask this PC from a browser.
   if ((req.url || '').split('?')[0] === '/ping') {
@@ -595,7 +647,7 @@ function start(port) {
   wss = new WebSocketServer({
     server,
     path: '/ws',
-    maxPayload: MAX_IMAGE + 2e6,
+    maxPayload: MAX_WS,
     // Everything here is text, and a phone may be on a slow link far away.
     perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 4, memLevel: 7 }, concurrencyLimit: 4 },
   });

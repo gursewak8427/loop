@@ -35,14 +35,14 @@ const readJson = (file, fallback) => {
 function projectOf(cwd) {
   const start = path.resolve(cwd);
   for (let dir = start; ; dir = path.dirname(dir)) {
-    if (fs.existsSync(path.join(ROOT, encodePath(dir)))) return { dir: encodePath(dir), path: dir };
+    if (memory.projectFolderSync(encodePath(dir)) || fs.existsSync(path.join(ROOT, encodePath(dir)))) return { dir: encodePath(dir), path: dir };
     if (path.dirname(dir) === dir) return { dir: encodePath(start), path: start };
   }
 }
 const here = projectOf(process.cwd());
 
 const teamOf = (dir) => {
-  const t = readJson(path.join(ROOT, dir, 'team.json'), null);
+  const t = readJson(path.join(memory.projectFolderSync(dir) || path.join(ROOT, dir), 'team.json'), null);
   return t && t.members && Array.isArray(t.roles) ? t : null;
 };
 const nameOf = (t, id) => ((t && t.names) || {})[id] || id.slice(0, 8);

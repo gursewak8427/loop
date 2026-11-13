@@ -20,6 +20,7 @@ let backlog = [];
 const unsafe = (platform) => (shell.isWin(platform) ? /["&|<>^%!\r\n]/g : /["&|<>^%!\r\n$`\\]/g);
 
 function buildCommand(o, settings, mcpConfig, platform = process.platform) {
+  if (o.agentCommand) return o.agentCommand; // another agent: built by the main process from fixed parts
   if (o.remoteCommand) return o.remoteCommand; // a tab on a server: set by the main process, never by the page
   if (o.kind === 'shell') return null;
   if (o.kind === 'login') return `${settings.claudeCmd || 'claude'} auth login`;
@@ -39,12 +40,11 @@ function buildCommand(o, settings, mcpConfig, platform = process.platform) {
     .slice(0, 3800)
     .trim();
   if (brief) parts.push('--append-system-prompt', `"${brief}"`);
+  if (o.model && /^[A-Za-z0-9._[]-]{1,80}$/.test(o.model)) parts.push('--model', o.model);
   if (o.kind === 'resume') parts.push('--resume', o.sessionId);
-  else {
-    parts.push('--session-id', o.sessionId);
-    const name = (o.name || '').replace(unsafe(platform), '').trim();
-    if (name) parts.push('-n', `"${name}"`);
-  }
+  else parts.push('--session-id', o.sessionId);
+  const name = (o.name || '').replace(unsafe(platform), '').trim();
+  if (name) parts.push('-n', `"${name}"`);
   return parts.join(' ');
 }
 
@@ -93,7 +93,7 @@ function send(m) {
 function open(wc, o, settings, mcpConfig, extraEnv) {
   if (tabs.has(o.id)) return;
   const command = buildCommand(o, settings, mcpConfig);
-  tabs.set(o.id, { wc, account: o.account || 'default', sessionId: o.sessionId || null, buffer: '', exited: false });
+  tabs.set(o.id, { wc, account: o.account || 'default', agent: o.agent || null, agentAccount: o.agentAccount || 'default', sessionId: o.sessionId || null, buffer: '', exited: false });
   // A tab on a server ends when its connection does; a local one drops back to a prompt in the project folder.
   send({ t: 'open', id: o.id, command, once: Boolean(o.remoteCommand), cwd: o.cwd, cols: o.cols, rows: o.rows, env: extraEnv || {} });
 }
@@ -148,7 +148,11 @@ function find(sessionId, except) {
 
 const usingAccount = (id) => [...tabs.values()].some((e) => e.account === id);
 
+// Whether an open tab runs as this login of another agent.
+const usingAgentAccount = (agent, account) => [...tabs.values()].some((t) => !t.exited && t.agent === agent && t.agentAccount === account);
+
 module.exports = {
+  usingAgentAccount,
   open,
   write,
   resize,
