@@ -4,7 +4,7 @@
 /* global PH, wirePhone, openPhone, phoneEcho, phoneSync */
 /* global openBoard, openTeamSetup, teamOf, roleOf, roleMenu, roleGroups, wireBoard, syncTeamNames */
 /* global layoutPanes, renderTabs, setLayout, slotOf, moveToSlot, adoptTab, wireWindows */
-/* global setupChat, touchScroll, openInternet, wireInternet, cloudRow, cloudBringBanner, wireCloud, wireLimits, renderStatus, renderUsage, runsOnPicker, runsOnLine */
+/* global setupChat, touchScroll, openInternet, wireInternet, cloudRow, cloudBringBanner, wireCloud, wireLimits, wireUpdates, renderStatus, renderUsage, runsOnPicker, runsOnLine */
 'use strict';
 
 // On a Mac the app's own shortcuts use Cmd, as Mac apps do, and Ctrl is left to
@@ -70,6 +70,7 @@ const ICONS = {
   clip: 'M10.5 4.5 5.6 9.4a1.4 1.4 0 0 0 2 2l5.2-5.2a2.9 2.9 0 0 0-4.1-4.1L3.4 7.4a4.4 4.4 0 0 0 6.2 6.2l4.6-4.6',
   file: 'M4 1.5h5.2L12.5 4.8v9.7H4zM9 1.5v3.5h3.5',
   import: 'M8 2.5v7.5M5 7l3 3 3-3M3 12.5h10',
+  download: 'M8 2v8.5M4.5 7 8 10.5 11.5 7M3 13.5h10',
   export: 'M8 10V2.5M5 5.5l3-3 3 3M3 12.5h10',
   cloud: 'M4.5 12.5a3 3 0 0 1-.4-6 4 4 0 0 1 7.8 1 2.5 2.5 0 0 1-.4 5z',
   memory: 'M4 2.5h6l2.5 2.5v8.5H4zM6 7h4.5M6 9.5h4.5',
@@ -2323,6 +2324,7 @@ async function openSettings() {
       },
       { key: 'notify', label: 'Notify me when a session finishes while I am in another window', type: 'checkbox', value: s.notify !== false },
       { key: 'restoreOnStart', label: 'Reopen the sessions from last time when Loop starts', type: 'checkbox', value: Boolean(s.restoreOnStart) },
+      { key: 'autoUpdate', label: 'Download Loop updates by themselves (you choose when to restart)', type: 'checkbox', value: s.autoUpdate !== false },
       { key: 'fastGpu', label: 'Draw on the high-performance graphics card (applies after a restart)', type: 'checkbox', value: s.fastGpu !== false },
       {
         key: 'viewDesktop',
@@ -2359,6 +2361,7 @@ async function openSettings() {
     memoryDir: s.memoryDir,
   };
   save();
+  deck.updateAuto(S.config.settings.autoUpdate);
   // A voice is chosen by ear: say one line in the new one straight away.
   if (v.voiceName && v.voiceName !== s.voiceName) hearVoice(v.voiceName);
   const wanted = String(v.memoryDir || '').trim();
@@ -2871,6 +2874,7 @@ window.addEventListener('focus', () => {
   wireCloud();
   wireInternet();
   wireLimits();
+  if (!S.remote) wireUpdates();
   wireBoard();
   wirePhone();
   deck.trashList().then((t) => {
@@ -2887,7 +2891,13 @@ window.addEventListener('focus', () => {
   renderAll();
   if (state.memoryWarning) toast(state.memoryWarning, true);
   for (const spec of state.adopt || []) createTab({ ...spec, adopt: true });
-  if (!S.child && !S.remote && S.config.settings.restoreOnStart && S.config.lastOpen.length) {
+  // After an update Loop opens what was open, whatever the setting says.
+  const updated = Boolean(S.config.reopenAfterUpdate);
+  if (updated) {
+    S.config.reopenAfterUpdate = false;
+    save();
+  }
+  if (!S.child && !S.remote && (S.config.settings.restoreOnStart || updated) && S.config.lastOpen.length) {
     S.bootOpen = S.config.lastOpen.filter((it) => it.server);
     reopenLast(true);
   }

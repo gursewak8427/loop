@@ -3212,6 +3212,17 @@ body.dragging-tab .strip-grip {
   height: 18px;
   border-radius: 9px;
 }
+.sb-update .ic {
+  width: 13px;
+  height: 13px;
+}
+.sb-update.ready {
+  color: var(--accent);
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  height: 18px;
+  border-radius: 9px;
+}
 .sb-cloud .ic {
   width: 13px;
   height: 13px;
