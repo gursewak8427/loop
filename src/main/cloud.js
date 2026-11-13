@@ -966,13 +966,16 @@ function link(dir, folder) {
 }
 
 // ---- remote access ----
-// Tools and environments (src/main/hub.js): read whole, keys and all; and this
-// machine's own tools handed over when asked.
+// Tools and environments (src/main/hub.js): read with the keys of the tools
+// that run on this machine; and this machine's own tools handed over when asked.
 const hubGet = () => call('GET', '/api/hub');
+// This machine's sign-in as a request header, for the tools that run in Loop
+// Cloud: the hub calls them there. Empty when signed out.
+const authHeader = () => (st.token ? { Authorization: `Bearer ${st.token}` } : {});
 const toolsImport = (servers) => call('POST', '/api/tools/import', { servers });
 
 const setRemote = (o) => call('PUT', '/api/devices/self', o);
 const testRemote = () => call('POST', '/api/devices/self/test', {}, { timeout: 20e3 });
 const redeemTicket = (ticket) => call('POST', '/api/remote/redeem', { ticket });
 
-module.exports = { hubGet, toolsImport, setRemote, testRemote, redeemTicket, init, stop, state, sendCode, verify, signOut, refresh, setMode, setProjectMode, setDefaultMode, link, folderDirs, syncNow, backupNow, backups, restore, wanted, scan, normalizeRemote, matchProjects, cloudProjects, bringIn, cloudNotes, bringNotes, BASE };
+module.exports = { hubGet, authHeader, toolsImport, setRemote, testRemote, redeemTicket, init, stop, state, sendCode, verify, signOut, refresh, setMode, setProjectMode, setDefaultMode, link, folderDirs, syncNow, backupNow, backups, restore, wanted, scan, normalizeRemote, matchProjects, cloudProjects, bringIn, cloudNotes, bringNotes, BASE };

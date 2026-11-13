@@ -15,6 +15,9 @@
 // Tools and environments are set up on the Loop Cloud website and read here
 // (adopt). What this PC adds is its own: which environment a project uses, and
 // its say-so before a program the cloud names is run (approve).
+//
+// A tool can also run in Loop Cloud (viaCloud). This PC is then given no key
+// for it, only an address on Loop Cloud, which it calls with its own sign-in.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -35,6 +38,8 @@ let server = null;
 let port = 0;
 const secret = crypto.randomBytes(16).toString('hex');
 let onChange = () => {};
+let cloudHeaders = () => ({}); // this machine's Loop Cloud sign-in, as request headers
+let cloudBase = ''; // where Loop Cloud is; the only place that sign-in is sent
 const links = new Map(); // server key -> a live connection
 const lastErr = new Map(); // server key -> why it did not connect
 
@@ -85,6 +90,7 @@ function state() {
       headerNames: Object.keys(s.headers || {}),
       fileNames: Object.keys(s.files || {}),
       on: s.on || '',
+      viaCloud: viaCloud(s),
       here: !elsewhere(s),
       ask: asks(s),
       up: links.has(key) && links.get(key).ready,
@@ -406,10 +412,19 @@ class Link {
   // A web tool answers a POST with JSON, or with a stream that carries the answer.
   async post(msg, timeout) {
     const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(this.def.headers || {}) };
+    const far = viaCloud(this.def);
+    if (far) {
+      // This call carries the machine's sign-in, so it goes to Loop Cloud and
+      // nowhere else, whatever the document says.
+      if (!inCloud(this.def.url)) throw new Error('It is marked as running in Loop Cloud, but its address is somewhere else. It was not called.');
+      const mine = cloudHeaders() || {};
+      if (!mine.Authorization) throw new Error('Sign in to Loop Cloud first.');
+      Object.assign(headers, mine);
+    }
     if (this.session) headers['Mcp-Session-Id'] = this.session;
     let res;
     try {
-      res = await fetch(this.def.url, { method: 'POST', headers, body: JSON.stringify(msg), signal: AbortSignal.timeout(timeout) });
+      res = await fetch(this.def.url, { method: 'POST', headers, body: JSON.stringify(msg), signal: AbortSignal.timeout(timeout), ...(far ? { redirect: 'error' } : {}) });
     } catch (e) {
       throw new Error(e.name === 'TimeoutError' ? `No answer in ${Math.round(timeout / 1000)} seconds.` : `Could not reach it (${(e.cause && (e.cause.code || e.cause.message)) || e.message}).`);
     }
@@ -680,7 +695,17 @@ function adopt(theirs, machine) {
 // said so: a stolen cloud sign-in must not be a way to run commands on it.
 // Any change to the command or its keys asks again.
 const print = (s) => crypto.createHash('sha256').update(JSON.stringify([s.command, s.args || [], Object.entries(s.env || {}).sort(), Object.entries(s.files || {}).sort()])).digest('hex');
-const elsewhere = (s) => Boolean(s.on && s.on !== doc.machine);
+// A tool that runs in Loop Cloud: nothing of it runs here, so it is on every
+// machine and there is nothing to allow.
+const viaCloud = (s) => s.kind === 'http' && s.viaCloud === true;
+function inCloud(url) {
+  try {
+    return Boolean(cloudBase) && String(url).startsWith(`${cloudBase}/`) && new URL(url).origin === new URL(cloudBase).origin;
+  } catch {
+    return false;
+  }
+}
+const elsewhere = (s) => !viaCloud(s) && Boolean(s.on && s.on !== doc.machine);
 const asks = (s) => s.kind === 'stdio' && !elsewhere(s) && !doc.approved.includes(print(s));
 
 function approve(key) {
@@ -705,6 +730,8 @@ let sweep = null;
 async function init(userData, opts = {}) {
   FILE = path.join(userData, 'mcp-hub.json');
   onChange = opts.onChange || (() => {});
+  cloudHeaders = opts.cloudHeaders || (() => ({}));
+  cloudBase = String(opts.cloudBase || '').replace(/\/+$/, '');
   load();
   await listen();
   sweep = setInterval(() => {

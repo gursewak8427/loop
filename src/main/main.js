@@ -802,7 +802,7 @@ function registerIpc() {
       const r = await cloud.toolsImport(list);
       hub.trust(list); // they are this PC's own programs
       await hubRefresh();
-      return { ok: true, added: r.added };
+      return { ok: true, added: r.added, skipped: r.skipped || 0 };
     } catch (e) {
       return { ok: false, error: e.message };
     }
@@ -1310,7 +1310,7 @@ if (!app.requestSingleInstanceLock()) {
       onChange: (s) => sendAll('cloud', s),
       afterPull: () => memory.forget(),
     });
-    await hub.init(app.getPath('userData'), { onChange: () => sendAll('hub', hubView()) });
+    await hub.init(app.getPath('userData'), { onChange: () => sendAll('hub', hubView()), cloudHeaders: cloud.authHeader, cloudBase: cloud.BASE });
     setInterval(() => hubRefresh().catch(() => {}), 30e3).unref();
     setTimeout(() => hubRefresh().catch(() => {}), 6e3).unref();
     remoteDesk.init({

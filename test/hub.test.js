@@ -28,6 +28,9 @@ else r({});}});`,
 let web;
 let webUrl;
 let sawToken = '';
+let cloud;
+let cloudBase;
+const cloudSaw = [];
 test.before(async () => {
   web = http.createServer((req, res) => {
     let raw = '';
@@ -49,11 +52,34 @@ test.before(async () => {
   });
   await new Promise((r) => web.listen(0, '127.0.0.1', r));
   webUrl = `http://127.0.0.1:${web.address().port}/mcp`;
-  await hub.init(tmp);
+  // Loop Cloud, as far as the hub knows it: the address that takes this machine's sign-in.
+  cloud = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', () => {
+      cloudSaw.push({ url: req.url, auth: req.headers.authorization || '' });
+      if (req.headers.authorization !== 'Bearer machine-sign-in') return res.writeHead(401).end();
+      const m = JSON.parse(raw);
+      if (m.id === undefined) return res.writeHead(202).end();
+      const result =
+        m.method === 'initialize'
+          ? { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'Far', version: '1' } }
+          : m.method === 'tools/list'
+            ? { tools: [{ name: 'far', description: 'Runs in the cloud', inputSchema: { type: 'object' } }] }
+            : { content: [{ type: 'text', text: 'from the cloud' }] };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }));
+    });
+  });
+  await new Promise((r) => cloud.listen(0, '127.0.0.1', r));
+  cloudBase = `http://127.0.0.1:${cloud.address().port}`;
+  await hub.init(tmp, { cloudHeaders: () => ({ Authorization: 'Bearer machine-sign-in' }), cloudBase });
 });
 test.after(() => {
   hub.stop();
   web.close();
+  cloud.close();
+  cloud.closeAllConnections(); // the hub's calls leave a connection open; do not wait for it
 });
 
 const rpc = (dir, method, params) => hub.handle({ jsonrpc: '2.0', id: 1, method, params }, dir).then((r) => r.result);
@@ -219,6 +245,42 @@ else r({});}});`,
   delete gone.servers.keyed;
   hub.adopt(gone, 'This machine');
   assert.ok(!fs.existsSync(path.join(tmp, 'mcp-files', 'keyed')));
+});
+
+test("a tool that runs in Loop Cloud is called there with this machine's sign-in, and nowhere else", async () => {
+  const file = JSON.parse(fs.readFileSync(path.join(tmp, 'mcp-hub.json'), 'utf8'));
+  const work = hub.state().envs[0];
+  const servers = { ...file.servers };
+  // As the cloud sends one: an address on Loop Cloud, and no key at all.
+  servers.cloudy = { name: 'Cloudy', kind: 'http', url: `${cloudBase}/api/gw/cloudy`, viaCloud: true, on: 'Some other machine' };
+  // A document that has been tampered with: marked the same way, pointing somewhere else.
+  servers.stray = { name: 'Stray', kind: 'http', url: webUrl, viaCloud: true };
+  servers.lookalike = { name: 'Lookalike', kind: 'http', url: `${cloudBase}.example.com/api/gw/x`, viaCloud: true };
+  hub.adopt({ at: Date.now() + 120000, servers, envs: { [work.id]: { name: work.name, only: true, servers: [...work.servers, 'cloudy', 'stray'] } } }, 'This machine');
+
+  const by = Object.fromEntries(hub.state().servers.map((s) => [s.key, s]));
+  assert.strictEqual(by.cloudy.viaCloud, true);
+  assert.strictEqual(by.cloudy.ask, false, 'nothing of it runs here, so there is nothing to allow');
+  assert.strictEqual(by.cloudy.here, true, 'it is on every machine, whatever the document says about one');
+  assert.strictEqual(by[sumsKey] ? by[sumsKey].viaCloud : false, false);
+
+  assert.deepStrictEqual((await hub.test('cloudy')).tools, ['far']);
+  const ran = await rpc('proj-b', 'tools/call', { name: 'cloudy__far', arguments: {} });
+  assert.strictEqual(ran.content[0].text, 'from the cloud');
+  assert.ok(cloudSaw.length >= 3 && cloudSaw.every((c) => c.auth === 'Bearer machine-sign-in' && c.url === '/api/gw/cloudy'), 'every call carried the sign-in');
+
+  // The sign-in is never sent to an address outside Loop Cloud.
+  sawToken = '';
+  const calls = cloudSaw.length;
+  for (const key of ['stray', 'lookalike']) {
+    const out = await hub.test(key);
+    assert.strictEqual(out.ok, false);
+    assert.match(out.error, /somewhere else/);
+    assert.ok(!out.error.includes('machine-sign-in'));
+  }
+  assert.strictEqual(sawToken, '', 'the other address was not called at all');
+  assert.strictEqual(cloudSaw.length, calls);
+  assert.ok(!JSON.stringify(hub.state()).includes('machine-sign-in'), 'a window never sees the sign-in');
 });
 
 test("bringing in Claude Code's own tools", () => {
