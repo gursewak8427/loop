@@ -110,6 +110,7 @@ function start(o) {
   const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompt-tool', 'stdio'];
   for (const flag of String(settings.flags || '').split(/\s+/).filter(Boolean)) args.push(flag);
   if (mcpConfig) args.push('--mcp-config', mcpConfig);
+  if (mcpConfig && o.strictMcp) args.push('--strict-mcp-config');
   if (brief) args.push('--append-system-prompt', brief);
   // The Remote Control switch, for a session with no terminal: it connects to
   // claude.ai as it starts, the same way a terminal session does.

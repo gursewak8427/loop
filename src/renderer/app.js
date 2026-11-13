@@ -4,7 +4,7 @@
 /* global PH, wirePhone, openPhone, phoneEcho, phoneSync */
 /* global openBoard, openTeamSetup, teamOf, roleOf, roleMenu, roleGroups, wireBoard, syncTeamNames */
 /* global layoutPanes, renderTabs, setLayout, slotOf, moveToSlot, adoptTab, wireWindows */
-/* global setupChat, touchScroll, openInternet, wireInternet, cloudRow, cloudBringBanner, wireCloud, wireLimits, wireUpdates, renderStatus, renderUsage, runsOnPicker, runsOnLine */
+/* global setupChat, touchScroll, openInternet, wireInternet, cloudRow, cloudBringBanner, wireCloud, wireLimits, wireUpdates, wireTools, toolsLabel, projectToolsMenu, renderStatus, renderUsage, runsOnPicker, runsOnLine */
 'use strict';
 
 // On a Mac the app's own shortcuts use Cmd, as Mac apps do, and Ctrl is left to
@@ -882,6 +882,7 @@ function projectMenu(x, y, p) {
     p.server ? null : { label: 'Board', icon: 'board', run: () => openBoard(p) },
     p.server ? null : { label: teamOf(p.dir) ? 'Team' : 'Create a team', icon: 'team', run: () => openTeamSetup(p) },
     p.server ? null : { label: 'Project memory', icon: 'book', run: () => openDrawer(p.dir, null) },
+    p.server || S.remote ? null : { label: `Tools: ${toolsLabel(p.dir)}`, icon: 'gear', run: () => projectToolsMenu(x, y, p) },
     '-',
     { label: 'Move to workspace', icon: 'move', run: () => moveMenu(x, y, p) },
     p.server ? null : { label: `Model: ${llmName(llmFor(p.dir, null))}`, icon: 'spark', run: () => projectLlmMenu(x, y, p) },
@@ -2875,6 +2876,7 @@ window.addEventListener('focus', () => {
   wireInternet();
   wireLimits();
   if (!S.remote) wireUpdates();
+  if (!S.remote) wireTools();
   wireBoard();
   wirePhone();
   deck.trashList().then((t) => {

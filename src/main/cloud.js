@@ -966,8 +966,13 @@ function link(dir, folder) {
 }
 
 // ---- remote access ----
+// Tool connections (src/main/hub.js), kept for your other machines.
+const hubGet = () => call('GET', '/api/hub');
+const hubPut = (doc) => call('PUT', '/api/hub', { doc });
+const hubForget = () => call('DELETE', '/api/hub');
+
 const setRemote = (o) => call('PUT', '/api/devices/self', o);
 const testRemote = () => call('POST', '/api/devices/self/test', {}, { timeout: 20e3 });
 const redeemTicket = (ticket) => call('POST', '/api/remote/redeem', { ticket });
 
-module.exports = { setRemote, testRemote, redeemTicket, init, stop, state, sendCode, verify, signOut, refresh, setMode, setProjectMode, setDefaultMode, link, folderDirs, syncNow, backupNow, backups, restore, wanted, scan, normalizeRemote, matchProjects, cloudProjects, bringIn, cloudNotes, bringNotes, BASE };
+module.exports = { hubGet, hubPut, hubForget, setRemote, testRemote, redeemTicket, init, stop, state, sendCode, verify, signOut, refresh, setMode, setProjectMode, setDefaultMode, link, folderDirs, syncNow, backupNow, backups, restore, wanted, scan, normalizeRemote, matchProjects, cloudProjects, bringIn, cloudNotes, bringNotes, BASE };
