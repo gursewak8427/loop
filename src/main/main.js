@@ -46,6 +46,7 @@ const internet = require('./internet');
 const chat = require('./chat');
 const shellOf = require('./shell');
 const updater = require('./updater');
+const hub = require('./hub');
 
 if (process.env.SD_USERDATA) app.setPath('userData', process.env.SD_USERDATA);
 
@@ -110,6 +111,25 @@ const waiting = new Map(); // request id -> resolve, for questions put to a wind
 let askSeq = 0;
 
 const everyWindow = () => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
+// Tool connections travel to your other machines through Loop Cloud, when you
+// have said so. Newest wins; each machine keeps its own machine-only tools.
+let hubTimer = null;
+let hubBusy = false;
+async function hubSync(push) {
+  if (hubBusy || !config || !config.hubCarry || !cloud.state().signedIn) return;
+  hubBusy = true;
+  try {
+    const far = await cloud.hubGet();
+    if (far && far.doc && hub.merged(far.doc)) return;
+    const mine = hub.shared();
+    if (push && mine.at > ((far && far.at) || 0)) await cloud.hubPut(mine);
+  } catch {
+    // the next round tries again
+  } finally {
+    hubBusy = false;
+  }
+}
+
 const sendAll = (channel, ...args) => {
   everyWindow().forEach((w) => w.webContents.send(channel, ...args));
   remoteDesk.broadcast(channel, ...args); // and Loop open in a browser elsewhere
@@ -624,7 +644,10 @@ function registerIpc() {
       const env = { ...accounts.envFor(o.account), ...(isClaude ? viewEnv() : {}), ...llms.envFor(llm), ...(loopOwns ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}) };
       // Right after login the tools on this PC may still be starting; a session that beats them keeps them red.
       if (isClaude) await localTools.ready(env, o.cwd);
-      ptys.open(e.sender, o, config.settings, wantsMemory ? memory.configFor(o.dir, o.sessionId) : null, env);
+      // One file of tools for the session: Loop's memory, and its environment's tools.
+      const tools = isClaude ? hub.fileFor(o.dir, o.sessionId, wantsMemory ? memory.urlFor(o.dir, o.sessionId) : null) : { file: null };
+      o.strictMcp = Boolean(tools.only);
+      ptys.open(e.sender, o, config.settings, tools.file, env);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -750,6 +773,24 @@ function registerIpc() {
   ipcMain.handle('cloud:restore', cloudDo((id) => cloud.restore(String(id))));
   ipcMain.handle('cloud:refresh', cloudDo(() => cloud.refresh().then(() => cloud.state())));
   ipcMain.on('cloud:site', () => shell.openExternal(cloud.BASE + '/cloud'));
+
+  // Tool environments: see src/main/hub.js. Keys and tokens go in, never out.
+  ipcMain.handle('hub:state', () => ({ ...hub.state(), carry: Boolean(config.hubCarry), signedIn: cloud.state().signedIn }));
+  ipcMain.handle('hub:saveServer', (_e, o) => hub.saveServer(o || {}));
+  ipcMain.handle('hub:removeServer', (_e, key) => hub.removeServer(String(key)));
+  ipcMain.handle('hub:saveEnv', (_e, o) => hub.saveEnv(o || {}));
+  ipcMain.handle('hub:removeEnv', (_e, id) => hub.removeEnv(String(id)));
+  ipcMain.handle('hub:projectEnv', (_e, dir, id) => hub.setProjectEnv(String(dir), String(id || '')));
+  ipcMain.handle('hub:defaultEnv', (_e, id) => hub.setDefaultEnv(String(id || '')));
+  ipcMain.handle('hub:test', (_e, key) => hub.test(String(key)));
+  ipcMain.handle('hub:import', () => hub.importClaude(accounts.homeOf('default').json));
+  ipcMain.handle('hub:carry', async (_e, on) => {
+    config.hubCarry = Boolean(on);
+    saveConfigSoon();
+    if (!on) await cloud.hubForget().catch(() => {});
+    else await hubSync(true);
+    return { ok: true };
+  });
 
   // Updates: see src/main/updater.js.
   ipcMain.handle('update:state', () => updater.get());
@@ -911,6 +952,7 @@ function registerIpc() {
       return err.message;
     }
     if (!direct.list().includes(String(o.sessionId))) await localTools.ready(env, o.cwd);
+    const tools = hub.fileFor(String(o.dir), String(o.sessionId), config.settings.memoryEnabled !== false ? memory.urlFor(o.dir, o.sessionId) : null);
     return direct.send({
       sessionId: String(o.sessionId),
       cwd: String(o.cwd),
@@ -921,7 +963,8 @@ function registerIpc() {
       // The switch decides here too: on starts it connected to claude.ai.
       remote: !llm && Boolean((config.sessionRemote || {})[o.sessionId]),
       settings: config.settings,
-      mcpConfig: config.settings.memoryEnabled !== false ? memory.configFor(o.dir, o.sessionId) : null,
+      mcpConfig: tools.file,
+      strictMcp: Boolean(tools.only),
       brief: config.settings.memoryEnabled !== false ? [loopOwns ? memory.ownerBrief(String(o.dir), String(o.sessionId)) : '', memory.startBrief(o.dir, o.sessionId)].filter(Boolean).join(' ') : '',
       env,
     });
@@ -1251,6 +1294,15 @@ if (!app.requestSingleInstanceLock()) {
       onChange: (s) => sendAll('cloud', s),
       afterPull: () => memory.forget(),
     });
+    await hub.init(app.getPath('userData'), {
+      onChange: (s) => {
+        sendAll('hub', { ...s, carry: Boolean(config.hubCarry), signedIn: cloud.state().signedIn });
+        clearTimeout(hubTimer);
+        hubTimer = setTimeout(() => hubSync(true), 2500);
+      },
+    });
+    setInterval(() => hubSync(false), 30e3).unref();
+    setTimeout(() => hubSync(false), 8e3).unref();
     remoteDesk.init({
       renderer: path.join(__dirname, '..', 'renderer'),
       nodeModules: path.join(__dirname, '..', '..', 'node_modules'),
@@ -1297,6 +1349,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => {
     updater.stop();
+    hub.stop();
     stats.stop();
     accounts.stopWatching();
     llms.stop();

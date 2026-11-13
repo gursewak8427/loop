@@ -1,7 +1,7 @@
 {
   "name": "loop",
   "productName": "Loop",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Workspace-based control room for Claude Code sessions",
   "main": "src/main/main.js",
   "author": "Prismaple",
@@ -10,7 +10,7 @@
   "scripts": {
     "start": "electron .",
     "demo": "node scripts/demo.js",
-    "test": "node --test test/memory.test.js test/scanner.test.js test/server.test.js test/accounts.test.js test/launch.test.js test/shell.test.js test/remote.test.js test/servers.test.js test/board.test.js test/direct.test.js test/tasks.test.js test/trash.test.js test/phone.test.js test/relay.test.js test/rules.test.js test/remote-switch.test.js test/gate.test.js test/localtools.test.js test/whatsapp.test.js test/subs.test.js test/voice.test.js test/voice-flow.test.js test/renderer.test.js test/llms.test.js test/agents.test.js test/memory-import.test.js test/memory-layout.test.js test/memory-sources.test.js test/session-model.test.js test/cloud-sync.test.js test/limits.test.js test/layout-remote.test.js test/internet.test.js test/session-name.test.js test/remote-desk-page.test.js test/scope.test.js test/chat-files.test.js test/demo.test.js test/check-web.test.js test/stats.test.js test/update-config.test.js",
+    "test": "node --test test/memory.test.js test/scanner.test.js test/server.test.js test/accounts.test.js test/launch.test.js test/shell.test.js test/remote.test.js test/servers.test.js test/board.test.js test/direct.test.js test/tasks.test.js test/trash.test.js test/phone.test.js test/relay.test.js test/rules.test.js test/remote-switch.test.js test/gate.test.js test/localtools.test.js test/whatsapp.test.js test/subs.test.js test/voice.test.js test/voice-flow.test.js test/renderer.test.js test/llms.test.js test/agents.test.js test/memory-import.test.js test/memory-layout.test.js test/memory-sources.test.js test/session-model.test.js test/cloud-sync.test.js test/limits.test.js test/layout-remote.test.js test/internet.test.js test/session-name.test.js test/remote-desk-page.test.js test/scope.test.js test/chat-files.test.js test/demo.test.js test/check-web.test.js test/stats.test.js test/update-config.test.js test/hub.test.js",
     "icon": "python scripts/make-icon.py",
     "pack": "electron-builder --win dir",
     "pack:mac": "electron-builder --mac dir",

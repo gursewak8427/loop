@@ -28,6 +28,8 @@ function buildCommand(o, settings, mcpConfig, platform = process.platform) {
   const parts = [settings.claudeCmd || 'claude'];
   if (settings.flags) parts.push(settings.flags);
   if (mcpConfig) parts.push('--mcp-config', `"${mcpConfig}"`);
+  // A tool environment set to "only these tools": the agent's own list is left out.
+  if (mcpConfig && o.strictMcp) parts.push('--strict-mcp-config');
   if (o.remote) {
     const label = (o.title || o.name || '').replace(unsafe(platform), '').trim();
     parts.push('--remote-control', `"${label || 'Loop'}"`);
