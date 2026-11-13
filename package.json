@@ -1,7 +1,7 @@
 {
   "name": "loop",
   "productName": "Loop",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Workspace-based control room for Claude Code sessions",
   "main": "src/main/main.js",
   "author": "Prismaple",

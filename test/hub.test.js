@@ -172,6 +172,55 @@ test('what is set up on Loop Cloud is taken as it is; this PC keeps its own choi
   assert.strictEqual(hub.state().servers.find((x) => x.key === 'newprog').ask, true);
 });
 
+test('a tool carries its files: each machine puts them in place and the command is given the path', async () => {
+  // A tool whose one job is to read the file it was pointed at, and the file named in its key.
+  const reader = path.join(tmp, 'reader.js');
+  fs.writeFileSync(
+    reader,
+    `const fs=require('fs');let buf='';process.stdin.on('data',d=>{buf+=d;let i;while((i=buf.indexOf('\\n'))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);if(!l.trim())continue;const m=JSON.parse(l);if(m.id===undefined)continue;
+const r=x=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result:x})+'\\n');
+if(m.method==='initialize')r({protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'reader',version:'1'}});
+else if(m.method==='tools/list')r({tools:[{name:'read',description:'Reads its key file',inputSchema:{type:'object'}}]});
+else if(m.method==='tools/call')r({content:[{type:'text',text:fs.readFileSync(process.argv[2].slice(6),'utf8')+'|'+fs.readFileSync(process.env.CERT,'utf8')+'|'+process.argv[2]}]});
+else r({});}});`,
+  );
+  const b64 = (t) => Buffer.from(t).toString('base64');
+  const state0 = hub.state();
+  const work = state0.envs[0];
+  const servers = Object.fromEntries(Object.entries(JSON.parse(fs.readFileSync(path.join(tmp, 'mcp-hub.json'), 'utf8')).servers));
+  servers.keyed = { name: 'Keyed', kind: 'stdio', command: process.execPath, args: [reader, '--key={file:id_test}'], env: { CERT: '{file:ca.pem}' }, files: { id_test: b64('PRIVATE-KEY-BODY'), 'ca.pem': b64('CERT-BODY') } };
+  const theirs = { at: Date.now() + 60000, servers, envs: { [work.id]: { name: work.name, only: true, servers: [...work.servers, 'keyed'] } } };
+  hub.adopt(theirs, 'This machine');
+  const seen = hub.state().servers.find((s) => s.key === 'keyed');
+  assert.deepStrictEqual(seen.fileNames, ['id_test', 'ca.pem']);
+  assert.ok(!JSON.stringify(hub.state()).includes(b64('PRIVATE-KEY-BODY')), 'a window is told the names of files, never what is in them');
+  assert.strictEqual(seen.ask, true, 'a program with files still waits to be allowed');
+  hub.approve('keyed');
+
+  const out = (await rpc('proj-b', 'tools/call', { name: 'keyed__read', arguments: {} })).content[0].text.split('|');
+  assert.strictEqual(out[0], 'PRIVATE-KEY-BODY', 'the path in the command leads to the file');
+  assert.strictEqual(out[1], 'CERT-BODY', 'so does the path in a key');
+  const at = out[2].slice(6);
+  assert.ok(at.startsWith(path.join(tmp, 'mcp-files', 'keyed')) && fs.existsSync(at));
+
+  // A changed file asks again; a removed file is taken off the disk; a removed tool takes its folder.
+  const next = JSON.parse(JSON.stringify(theirs));
+  next.at += 1;
+  next.servers.keyed.files = { id_test: b64('ROTATED-KEY') };
+  next.servers.keyed.env = {};
+  hub.adopt(next, 'This machine');
+  assert.strictEqual(hub.state().servers.find((s) => s.key === 'keyed').ask, true, 'a new key file is a new thing to allow');
+  hub.approve('keyed');
+  await hub.test('keyed');
+  assert.strictEqual(fs.readFileSync(at, 'utf8'), 'ROTATED-KEY');
+  assert.ok(!fs.existsSync(path.join(tmp, 'mcp-files', 'keyed', 'ca.pem')));
+  const gone = JSON.parse(JSON.stringify(next));
+  gone.at += 1;
+  delete gone.servers.keyed;
+  hub.adopt(gone, 'This machine');
+  assert.ok(!fs.existsSync(path.join(tmp, 'mcp-files', 'keyed')));
+});
+
 test("bringing in Claude Code's own tools", () => {
   const file = path.join(tmp, 'claude.json');
   fs.writeFileSync(

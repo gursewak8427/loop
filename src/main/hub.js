@@ -83,6 +83,7 @@ function state() {
       url: s.url || '',
       envNames: Object.keys(s.env || {}),
       headerNames: Object.keys(s.headers || {}),
+      fileNames: Object.keys(s.files || {}),
       on: s.on || '',
       here: !elsewhere(s),
       ask: asks(s),
@@ -236,6 +237,38 @@ function importClaude(file) {
   }
   if (added) save();
   return { ok: true, added };
+}
+
+// ---------- files a tool carries ----------
+
+// A tool's files (a key, a certificate) are written to a folder of its own on
+// this machine, readable by this user only, and {file:NAME} in its command,
+// keys or headers becomes the path. Files no longer attached are removed.
+function placeFiles(key, def) {
+  const dir = path.join(path.dirname(FILE), 'mcp-files', key);
+  const files = def.files || {};
+  const names = Object.keys(files);
+  if (!names.length) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return def;
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  for (const old of fs.readdirSync(dir)) if (files[old] === undefined) fs.rmSync(path.join(dir, old), { force: true });
+  for (const n of names) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$/.test(n)) continue;
+    const want = Buffer.from(files[n], 'base64');
+    const at = path.join(dir, n);
+    let have = null;
+    try {
+      have = fs.readFileSync(at);
+    } catch {
+      // not there yet
+    }
+    if (!have || !have.equals(want)) fs.writeFileSync(at, want, { mode: 0o600 });
+  }
+  const put = (v) => String(v).replace(/\{file:([^}]+)\}/g, (m, n) => (files[n] !== undefined ? path.join(dir, n) : m));
+  const map = (o) => Object.fromEntries(Object.entries(o || {}).map(([k, v]) => [k, put(v)]));
+  return { ...def, command: def.command ? put(def.command) : def.command, args: (def.args || []).map(put), env: map(def.env), headers: map(def.headers) };
 }
 
 // ---------- talking to one server ----------
@@ -434,6 +467,7 @@ class Link {
 const plain = (e) => String((e && e.message) || e || 'It did not connect.').split('\n')[0].slice(0, 240);
 
 function drop(key) {
+  if (!doc.servers[key] && FILE) fs.rmSync(path.join(path.dirname(FILE), 'mcp-files', key), { recursive: true, force: true });
   const l = links.get(key);
   if (l) l.close();
   links.delete(key);
@@ -450,7 +484,7 @@ async function linkTo(key) {
   }
   let l = links.get(key);
   if (!l) {
-    l = new Link(key, def);
+    l = new Link(key, placeFiles(key, def));
     links.set(key, l);
   }
   await l.open();
@@ -629,6 +663,13 @@ function adopt(theirs, machine) {
   for (const k of Object.keys(doc.servers)) if (JSON.stringify(next.servers[k]) !== JSON.stringify(doc.servers[k])) drop(k);
   doc.servers = next.servers;
   doc.envs = next.envs;
+  // A tool that is gone takes its files off this machine with it.
+  const kept = path.join(path.dirname(FILE), 'mcp-files');
+  try {
+    for (const k of fs.readdirSync(kept)) if (!doc.servers[k]) fs.rmSync(path.join(kept, k), { recursive: true, force: true });
+  } catch {
+    // no files were ever placed
+  }
   doc.at = Number(theirs.at) || Date.now();
   if (!doc.envs[doc.defaultEnv]) doc.defaultEnv = '';
   save(false);
@@ -638,7 +679,7 @@ function adopt(theirs, machine) {
 // A program named by the cloud runs on this PC only after someone here has
 // said so: a stolen cloud sign-in must not be a way to run commands on it.
 // Any change to the command or its keys asks again.
-const print = (s) => crypto.createHash('sha256').update(JSON.stringify([s.command, s.args || [], Object.entries(s.env || {}).sort()])).digest('hex');
+const print = (s) => crypto.createHash('sha256').update(JSON.stringify([s.command, s.args || [], Object.entries(s.env || {}).sort(), Object.entries(s.files || {}).sort()])).digest('hex');
 const elsewhere = (s) => Boolean(s.on && s.on !== doc.machine);
 const asks = (s) => s.kind === 'stdio' && !elsewhere(s) && !doc.approved.includes(print(s));
 
