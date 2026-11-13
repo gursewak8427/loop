@@ -119,7 +119,7 @@ function paintTools() {
         h(
           'small',
           { class: s.error && !s.ask && s.here ? 'bad' : '' },
-          !s.here ? `Lives on ${s.on}, so it is skipped on this PC.` : s.ask ? 'A program. It runs on this PC only once you allow it.' : s.error || (s.up ? `Connected · ${s.tools} tool${s.tools === 1 ? '' : 's'}` : 'Starts when a session first needs it.'),
+          !s.here ? `Lives on ${s.on}, so it is skipped on this PC.` : s.ask ? 'A program. It runs on this PC only once you allow it.' : s.error || (s.up ? `Connected · ${s.tools} tool${s.tools === 1 ? '' : 's'}${s.viaCloud ? ' · Runs in Loop Cloud' : ''}` : s.viaCloud ? 'Runs in Loop Cloud' : 'Starts when a session first needs it.'),
         ),
       ),
       s.here && s.ask
@@ -181,7 +181,8 @@ function paintTools() {
             b.disabled = true;
             const r = await deck.hubImport();
             b.disabled = false;
-            toast(r.ok ? (r.added ? `Sent ${r.added} tool${r.added === 1 ? '' : 's'} from this PC to Loop Cloud. Group them into an environment there.` : 'Loop Cloud already has every tool this PC is set up with.') : r.error, !r.ok);
+            const stay = r.skipped ? ` ${r.skipped} that only work on this PC stay here, in your agent's own settings.` : '';
+            toast(r.ok ? (r.added ? `Sent ${r.added} tool${r.added === 1 ? '' : 's'} to Loop Cloud.${stay}` : `Nothing new to send.${stay}`) : r.error, !r.ok);
           },
         },
         "Send this PC's tools to Loop Cloud",
