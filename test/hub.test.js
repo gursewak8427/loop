@@ -71,7 +71,6 @@ test('a tool is connected once, and its key never reaches a window', async () =>
   const seen = JSON.stringify(hub.state());
   assert.ok(!seen.includes('hunter2') && !seen.includes('s3cret'), 'no secret in what a window gets');
   assert.deepStrictEqual(hub.state().servers.find((s) => s.key === shoutKey).envNames, ['KEY']);
-  assert.strictEqual(hub.state().servers.find((s) => s.key === sumsKey).machineOnly, true, 'an address on this PC stays on this PC');
 });
 
 test('the Test button connects and lists the tools', async () => {
@@ -132,27 +131,45 @@ test('a broken tool does not take the others down, and says why', async () => {
   assert.ok(!hub.state().envs.find((e) => e.id === work.id).servers.includes(bad));
 });
 
-test('what travels to other machines leaves machine-only tools behind, and comes back merged', () => {
-  const far = hub.saveServer({ name: 'Notion', kind: 'http', url: 'https://mcp.example.com/mcp', headers: 'Authorization: Bearer n' }).key;
+test('what is set up on Loop Cloud is taken as it is; this PC keeps its own choices', async () => {
   const work = hub.state().envs.find((e) => e.name === 'Client work');
-  hub.saveEnv({ id: work.id, name: work.name, servers: [...work.servers, far] });
-  const out = hub.shared();
-  assert.deepStrictEqual(Object.keys(out.servers), [far], 'only the tool that works anywhere');
-  assert.deepStrictEqual(out.envs[work.id].servers, [far]);
-
-  // Another machine renamed the environment and added a tool; this one takes it and keeps its own.
-  const theirs = JSON.parse(JSON.stringify(out));
-  theirs.at = Date.now() + 5000;
-  theirs.envs[work.id].name = 'Clients';
-  theirs.servers.linear = { name: 'Linear', kind: 'http', url: 'https://linear.example.com/mcp', headers: {} };
-  theirs.envs[work.id].servers.push('linear');
-  assert.strictEqual(hub.merged(theirs), true);
-  const now = hub.state().envs.find((e) => e.id === work.id);
-  assert.strictEqual(now.name, 'Clients');
-  assert.ok(now.servers.includes('linear') && now.servers.includes(far));
-  assert.ok(now.servers.includes(shoutKey) && now.servers.includes(sumsKey), 'this PC keeps its own tools in the environment');
+  // The website's document: the two tools this PC knows, a program it has never seen,
+  // one that lives on another machine, and a renamed environment.
+  const theirs = {
+    at: Date.now() + 5000,
+    servers: {
+      [shoutKey]: { name: 'Shout', kind: 'stdio', command: process.execPath, args: [prog], env: { KEY: 'hunter2' } },
+      newprog: { name: 'New program', kind: 'stdio', command: process.execPath, args: [prog], env: { KEY: 'fromcloud' } },
+      far: { name: 'Far away', kind: 'stdio', command: 'C:\other\tool.exe', args: [], env: {}, on: 'Some other machine' },
+    },
+    envs: { [work.id]: { name: 'Clients', only: true, servers: [shoutKey, 'newprog', 'far'] } },
+  };
+  assert.strictEqual(hub.adopt(theirs, 'This machine'), true);
+  assert.strictEqual(hub.adopt(theirs, 'This machine'), false, 'the same thing twice changes nothing');
   assert.strictEqual(hub.envOf('proj-b').name, 'Clients', 'projects keep their environment');
-  assert.strictEqual(hub.merged(theirs), false, 'the same thing twice changes nothing');
+  assert.strictEqual(hub.envOf('proj-a'), null, 'an environment the website removed is gone here too');
+
+  const by = Object.fromEntries(hub.state().servers.map((x) => [x.key, x]));
+  assert.strictEqual(by[shoutKey].ask, false, 'a program allowed before stays allowed');
+  assert.strictEqual(by.newprog.ask, true, 'a program the cloud names is not run until someone here says so');
+  assert.strictEqual(by.far.here, false);
+
+  // Until it is allowed, its tools are simply not there, and the others work.
+  assert.deepStrictEqual(names(await rpc('proj-b', 'tools/list')), ['loop_find_tools', 'loop_run_tool', `${shoutKey}__shout`]);
+  const refused = await rpc('proj-b', 'tools/call', { name: 'newprog__shout', arguments: { text: 'x' } });
+  assert.strictEqual(refused.isError, true);
+  assert.match(refused.content[0].text, /not been allowed/);
+
+  assert.strictEqual(hub.approve('newprog'), true);
+  const ok = await rpc('proj-b', 'tools/call', { name: 'newprog__shout', arguments: { text: 'now' } });
+  assert.strictEqual(ok.content[0].text, 'NOW fromcloud');
+
+  // A changed command asks again.
+  const changed = JSON.parse(JSON.stringify(theirs));
+  changed.at += 1;
+  changed.servers.newprog.args = [prog, '--other'];
+  hub.adopt(changed, 'This machine');
+  assert.strictEqual(hub.state().servers.find((x) => x.key === 'newprog').ask, true);
 });
 
 test("bringing in Claude Code's own tools", () => {
@@ -170,9 +187,6 @@ test("bringing in Claude Code's own tools", () => {
   );
   assert.strictEqual(hub.importClaude(file).added, 3, 'the one Loop already has is left alone');
   const by = Object.fromEntries(hub.state().servers.map((s) => [s.name, s]));
-  assert.strictEqual(by.local.machineOnly, true);
-  assert.strictEqual(by.hosted.machineOnly, false);
-  assert.strictEqual(by.pinned.machineOnly, process.platform === 'win32');
   assert.deepStrictEqual(by.hosted.envNames, ['TOKEN']);
   assert.strictEqual(hub.importClaude(file).added, 0);
 });

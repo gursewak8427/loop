@@ -12,8 +12,9 @@
 // tokens (a program's environment, a web address's headers) never go to a
 // window: a window is told their names, not their values.
 //
-// Servers marked "this machine only" stay out of what Loop Cloud carries to
-// your other machines (src/main/cloud.js asks for shared() and gives merged()).
+// Tools and environments are set up on the Loop Cloud website and read here
+// (adopt). What this PC adds is its own: which environment a project uses, and
+// its say-so before a program the cloud names is run (approve).
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -27,10 +28,9 @@ const SEP = '__';
 const START = 45e3; // a program gets this long to say hello (npx may be downloading)
 const CALL = 10 * 60e3; // the longest one tool call may take
 const IDLE = 15 * 60e3; // a program nobody has used for this long is closed
-const LOCAL = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
 let FILE = '';
-let doc = { v: 1, at: 0, servers: {}, envs: {}, projectEnv: {}, defaultEnv: '' };
+let doc = { v: 1, at: 0, servers: {}, envs: {}, projectEnv: {}, defaultEnv: '', approved: [], machine: os.hostname() };
 let server = null;
 let port = 0;
 const secret = crypto.randomBytes(16).toString('hex');
@@ -56,7 +56,7 @@ function freeKey(base, taken) {
 function load() {
   try {
     const d = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-    doc = { v: 1, at: Number(d.at) || 0, servers: d.servers || {}, envs: d.envs || {}, projectEnv: d.projectEnv || {}, defaultEnv: d.defaultEnv || '' };
+    doc = { v: 1, at: Number(d.at) || 0, servers: d.servers || {}, envs: d.envs || {}, projectEnv: d.projectEnv || {}, defaultEnv: d.defaultEnv || '', approved: Array.isArray(d.approved) ? d.approved : [], machine: d.machine || os.hostname() };
   } catch {
     // nothing saved yet
   }
@@ -71,14 +71,6 @@ function save(touch = true) {
   onChange(state());
 }
 
-const isLocalUrl = (url) => {
-  try {
-    return LOCAL.has(new URL(url).hostname);
-  } catch {
-    return false;
-  }
-};
-
 // What a window may know: everything but the values of keys and tokens.
 function state() {
   return {
@@ -91,7 +83,9 @@ function state() {
       url: s.url || '',
       envNames: Object.keys(s.env || {}),
       headerNames: Object.keys(s.headers || {}),
-      machineOnly: Boolean(s.machineOnly),
+      on: s.on || '',
+      here: !elsewhere(s),
+      ask: asks(s),
       up: links.has(key) && links.get(key).ready,
       tools: links.has(key) ? links.get(key).tools.length : null,
       error: lastErr.get(key) || '',
@@ -99,6 +93,7 @@ function state() {
     envs: Object.entries(doc.envs).map(([id, e]) => ({ id, name: e.name, servers: (e.servers || []).filter((k) => doc.servers[k]), only: e.only !== false })),
     projectEnv: { ...doc.projectEnv },
     defaultEnv: doc.envs[doc.defaultEnv] ? doc.defaultEnv : '',
+    machine: doc.machine,
   };
 }
 
@@ -125,7 +120,7 @@ function saveServer(o) {
   const name = String(o.name || '').trim().slice(0, 60);
   if (!name) return { ok: false, error: 'Give it a name.' };
   const kind = o.kind === 'http' ? 'http' : 'stdio';
-  const s = { name, kind, machineOnly: Boolean(o.machineOnly) };
+  const s = { name, kind };
   if (kind === 'http') {
     let u;
     try {
@@ -136,14 +131,13 @@ function saveServer(o) {
     if (!/^https?:$/.test(u.protocol)) return { ok: false, error: 'The address must start with http:// or https://.' };
     s.url = u.toString();
     s.headers = pairs(o.headers, before ? before.headers : {});
-    if (isLocalUrl(s.url)) s.machineOnly = true; // an address on this PC means nothing on another one
   } else {
     const parts = words(o.command);
     if (!parts.length) return { ok: false, error: 'Give the command that starts it.' };
     s.command = parts[0];
     s.args = parts.slice(1);
     s.env = pairs(o.env, before ? before.env : {});
-    if (path.isAbsolute(s.command) || s.args.some((a) => path.isAbsolute(a))) s.machineOnly = true;
+    if (!doc.approved.includes(print(s))) doc.approved.push(print(s)); // typed in on this PC
   }
   const key = before ? o.key : freeKey(name, doc.servers);
   doc.servers[key] = s;
@@ -222,10 +216,10 @@ function fromClaude(file) {
     if (!s) continue;
     if (/^(http|sse)$/.test(s.type || '') && s.url) {
       if (s.type === 'sse') continue; // the older kind of web tool; not carried
-      out.push({ name, kind: 'http', url: s.url, headers: s.headers || {}, machineOnly: isLocalUrl(s.url) });
+      out.push({ name, kind: 'http', url: s.url, headers: s.headers || {} });
     } else if (s.command) {
       const args = Array.isArray(s.args) ? s.args.map(String) : [];
-      out.push({ name, kind: 'stdio', command: String(s.command), args, env: s.env || {}, machineOnly: path.isAbsolute(String(s.command)) || args.some((a) => path.isAbsolute(a)) });
+      out.push({ name, kind: 'stdio', command: String(s.command), args, env: s.env || {} });
     }
   }
   return out;
@@ -449,6 +443,11 @@ function drop(key) {
 async function linkTo(key) {
   const def = doc.servers[key];
   if (!def) throw new Error('That tool is no longer set up in Loop.');
+  if (elsewhere(def)) throw new Error(`It lives on ${def.on}, not on this machine.`);
+  if (asks(def)) {
+    lastErr.set(key, 'Waiting for you to allow it on this PC.');
+    throw new Error('It has not been allowed to run on this PC yet. Open Tools in Loop and allow it.');
+  }
   let l = links.get(key);
   if (!l) {
     l = new Link(key, def);
@@ -617,37 +616,45 @@ function fileFor(dir, sessionId, memoryUrl) {
   return { file, only: Boolean(mine && mine.only) };
 }
 
-// ---------- other machines ----------
+// ---------- what Loop Cloud says ----------
 
-// What travels: everything except the tools that only make sense on this PC.
-function shared() {
-  const servers = {};
-  for (const [k, s] of Object.entries(doc.servers)) if (!s.machineOnly) servers[k] = s;
-  const envs = {};
-  for (const [id, e] of Object.entries(doc.envs)) envs[id] = { name: e.name, only: e.only !== false, servers: (e.servers || []).filter((k) => servers[k]) };
-  return { v: 1, at: doc.at, servers, envs, defaultEnv: doc.defaultEnv };
-}
-
-// Takes what another machine saved. This PC keeps its own machine-only tools,
-// their places in environments, and which project uses which environment.
-function merged(theirs) {
-  if (!theirs || !theirs.servers || Number(theirs.at) <= doc.at) return false;
-  const mine = Object.fromEntries(Object.entries(doc.servers).filter(([, s]) => s.machineOnly));
-  const servers = { ...theirs.servers };
-  for (const [k, s] of Object.entries(mine)) servers[servers[k] ? freeKey(k, servers) : k] = s;
-  const envs = {};
-  for (const [id, e] of Object.entries(theirs.envs || {})) {
-    const local = ((doc.envs[id] || {}).servers || []).filter((k) => mine[k]);
-    envs[id] = { name: e.name, only: e.only !== false, servers: [...(e.servers || []).filter((k) => servers[k]), ...local] };
-  }
-  for (const [id, e] of Object.entries(doc.envs)) {
-    // An environment made here of machine-only tools alone never travelled: keep it.
-    if (!envs[id] && (e.servers || []).length && (e.servers || []).every((k) => mine[k])) envs[id] = e;
-  }
-  for (const k of Object.keys(doc.servers)) if (!servers[k] || JSON.stringify(servers[k]) !== JSON.stringify(doc.servers[k])) drop(k);
-  doc = { v: 1, at: Number(theirs.at), servers, envs, projectEnv: doc.projectEnv, defaultEnv: envs[theirs.defaultEnv] ? theirs.defaultEnv : envs[doc.defaultEnv] ? doc.defaultEnv : '' };
+// Takes the tools and environments as they are set up on the website. This PC
+// keeps what is its own: which project uses which environment, its default,
+// and which programs it has been allowed to run.
+function adopt(theirs, machine) {
+  if (machine && machine !== doc.machine) doc.machine = machine;
+  if (!theirs || !theirs.servers) return false;
+  const next = { servers: theirs.servers, envs: theirs.envs || {} };
+  if (JSON.stringify(next) === JSON.stringify({ servers: doc.servers, envs: doc.envs })) return false;
+  for (const k of Object.keys(doc.servers)) if (JSON.stringify(next.servers[k]) !== JSON.stringify(doc.servers[k])) drop(k);
+  doc.servers = next.servers;
+  doc.envs = next.envs;
+  doc.at = Number(theirs.at) || Date.now();
+  if (!doc.envs[doc.defaultEnv]) doc.defaultEnv = '';
   save(false);
   return true;
+}
+
+// A program named by the cloud runs on this PC only after someone here has
+// said so: a stolen cloud sign-in must not be a way to run commands on it.
+// Any change to the command or its keys asks again.
+const print = (s) => crypto.createHash('sha256').update(JSON.stringify([s.command, s.args || [], Object.entries(s.env || {}).sort()])).digest('hex');
+const elsewhere = (s) => Boolean(s.on && s.on !== doc.machine);
+const asks = (s) => s.kind === 'stdio' && !elsewhere(s) && !doc.approved.includes(print(s));
+
+function approve(key) {
+  const s = doc.servers[key];
+  if (!s || s.kind !== 'stdio') return false;
+  if (!doc.approved.includes(print(s))) doc.approved.push(print(s));
+  lastErr.delete(key);
+  save(false);
+  return true;
+}
+
+// The tools this PC itself handed to the cloud are its own: no need to ask.
+function trust(list) {
+  for (const s of list || []) if (s.kind === 'stdio' && !doc.approved.includes(print(s))) doc.approved.push(print(s));
+  save(false);
 }
 
 // ---------- start and stop ----------
@@ -674,4 +681,4 @@ function stop() {
   port = 0;
 }
 
-module.exports = { fileFor, init, stop, state, saveServer, removeServer, saveEnv, removeEnv, setProjectEnv, setDefaultEnv, envOf, importClaude, fromClaude, test, entryFor, shared, merged, handle, words, pairs, at: () => doc.at };
+module.exports = { fileFor, init, stop, state, saveServer, removeServer, saveEnv, removeEnv, setProjectEnv, setDefaultEnv, envOf, importClaude, fromClaude, test, entryFor, adopt, approve, trust, handle, words, pairs };

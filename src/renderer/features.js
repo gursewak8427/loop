@@ -81,7 +81,7 @@ function paletteItems() {
       : []),
     ...(S.switches.phone ? [{ label: 'Your phone', hint: 'Work on these sessions from the Loop app', glyph: 'phone', rank: 2.35, run: openPhone }] : []),
     { label: 'Accessible on the internet', hint: 'Open this PC from loop.prismaple.com and the phone app', glyph: 'cloud', rank: 2.3, run: openInternet },
-    ...(S.remote ? [] : [{ label: 'Tools and environments', hint: 'Connect an MCP once, use it in every session', glyph: 'gear', rank: 2.2, run: openTools }]),
+    ...(S.remote ? [] : [{ label: 'Tools', hint: 'Choose the environment of MCP tools this PC uses', glyph: 'gear', rank: 2.2, run: openTools }]),
     { label: 'Settings', hint: '', glyph: 'gear', rank: 2, run: openSettings },
     ...(S.remote ? [] : [{ label: 'Check for updates', hint: S.update ? `Loop ${S.update.version}` : '', glyph: 'download', rank: 1.9, run: checkForUpdates }]),
   );

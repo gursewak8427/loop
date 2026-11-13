@@ -111,24 +111,32 @@ const waiting = new Map(); // request id -> resolve, for questions put to a wind
 let askSeq = 0;
 
 const everyWindow = () => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
-// Tool connections travel to your other machines through Loop Cloud, when you
-// have said so. Newest wins; each machine keeps its own machine-only tools.
-let hubTimer = null;
-let hubBusy = false;
-async function hubSync(push) {
-  if (hubBusy || !config || !config.hubCarry || !cloud.state().signedIn) return;
-  hubBusy = true;
-  try {
-    const far = await cloud.hubGet();
-    if (far && far.doc && hub.merged(far.doc)) return;
-    const mine = hub.shared();
-    if (push && mine.at > ((far && far.at) || 0)) await cloud.hubPut(mine);
-  } catch {
-    // the next round tries again
-  } finally {
-    hubBusy = false;
-  }
+// Tools and environments are set up on the Loop Cloud website. This PC reads
+// them every half minute, and at once when Refresh is pressed.
+let hubBusy = null;
+let hubNote = ''; // why the last read did not work, for the window
+function hubRefresh() {
+  if (hubBusy) return hubBusy;
+  hubBusy = (async () => {
+    if (!cloud.state().signedIn) {
+      hubNote = '';
+      return { ok: false, error: 'Sign in to Loop Cloud first.' };
+    }
+    try {
+      const far = await cloud.hubGet();
+      const changed = hub.adopt(far.doc || { at: 0, servers: {}, envs: {} }, far.machine);
+      hubNote = '';
+      return { ok: true, changed };
+    } catch (e) {
+      hubNote = e.message;
+      return { ok: false, error: e.message };
+    } finally {
+      hubBusy = null;
+    }
+  })();
+  return hubBusy;
 }
+const hubView = () => ({ ...hub.state(), signedIn: cloud.state().signedIn, email: cloud.state().email || '', note: hubNote });
 
 const sendAll = (channel, ...args) => {
   everyWindow().forEach((w) => w.webContents.send(channel, ...args));
@@ -774,22 +782,30 @@ function registerIpc() {
   ipcMain.handle('cloud:refresh', cloudDo(() => cloud.refresh().then(() => cloud.state())));
   ipcMain.on('cloud:site', () => shell.openExternal(cloud.BASE + '/cloud'));
 
-  // Tool environments: see src/main/hub.js. Keys and tokens go in, never out.
-  ipcMain.handle('hub:state', () => ({ ...hub.state(), carry: Boolean(config.hubCarry), signedIn: cloud.state().signedIn }));
-  ipcMain.handle('hub:saveServer', (_e, o) => hub.saveServer(o || {}));
-  ipcMain.handle('hub:removeServer', (_e, key) => hub.removeServer(String(key)));
-  ipcMain.handle('hub:saveEnv', (_e, o) => hub.saveEnv(o || {}));
-  ipcMain.handle('hub:removeEnv', (_e, id) => hub.removeEnv(String(id)));
+  // Tools and environments: see src/main/hub.js. Set up on the website; chosen here.
+  ipcMain.handle('hub:state', () => hubView());
+  ipcMain.handle('hub:refresh', async () => {
+    const r = await hubRefresh();
+    return { ...r, state: hubView() };
+  });
   ipcMain.handle('hub:projectEnv', (_e, dir, id) => hub.setProjectEnv(String(dir), String(id || '')));
   ipcMain.handle('hub:defaultEnv', (_e, id) => hub.setDefaultEnv(String(id || '')));
+  ipcMain.handle('hub:approve', (_e, key) => hub.approve(String(key)));
   ipcMain.handle('hub:test', (_e, key) => hub.test(String(key)));
-  ipcMain.handle('hub:import', () => hub.importClaude(accounts.homeOf('default').json));
-  ipcMain.handle('hub:carry', async (_e, on) => {
-    config.hubCarry = Boolean(on);
-    saveConfigSoon();
-    if (!on) await cloud.hubForget().catch(() => {});
-    else await hubSync(true);
-    return { ok: true };
+  ipcMain.on('hub:site', () => shell.openExternal(cloud.BASE + '/cloud#/tools'));
+  // Hands the tools this PC's Claude Code already has to Loop Cloud, once asked.
+  ipcMain.handle('hub:import', async () => {
+    if (!cloud.state().signedIn) return { ok: false, error: 'Sign in to Loop Cloud first.' };
+    const list = hub.fromClaude(accounts.homeOf('default').json);
+    if (!list.length) return { ok: true, added: 0 };
+    try {
+      const r = await cloud.toolsImport(list);
+      hub.trust(list); // they are this PC's own programs
+      await hubRefresh();
+      return { ok: true, added: r.added };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
   });
 
   // Updates: see src/main/updater.js.
@@ -1294,15 +1310,9 @@ if (!app.requestSingleInstanceLock()) {
       onChange: (s) => sendAll('cloud', s),
       afterPull: () => memory.forget(),
     });
-    await hub.init(app.getPath('userData'), {
-      onChange: (s) => {
-        sendAll('hub', { ...s, carry: Boolean(config.hubCarry), signedIn: cloud.state().signedIn });
-        clearTimeout(hubTimer);
-        hubTimer = setTimeout(() => hubSync(true), 2500);
-      },
-    });
-    setInterval(() => hubSync(false), 30e3).unref();
-    setTimeout(() => hubSync(false), 8e3).unref();
+    await hub.init(app.getPath('userData'), { onChange: () => sendAll('hub', hubView()) });
+    setInterval(() => hubRefresh().catch(() => {}), 30e3).unref();
+    setTimeout(() => hubRefresh().catch(() => {}), 6e3).unref();
     remoteDesk.init({
       renderer: path.join(__dirname, '..', 'renderer'),
       nodeModules: path.join(__dirname, '..', '..', 'node_modules'),
