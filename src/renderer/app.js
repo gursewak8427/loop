@@ -4,6 +4,7 @@
 /* global PH, wirePhone, openPhone, phoneEcho, phoneSync */
 /* global openBoard, openTeamSetup, teamOf, roleOf, roleMenu, roleGroups, wireBoard, syncTeamNames */
 /* global layoutPanes, renderTabs, setLayout, slotOf, moveToSlot, adoptTab, wireWindows */
+/* global setupChat, touchScroll, openInternet, wireInternet, cloudRow, cloudBringBanner, wireCloud, wireLimits, renderStatus, renderUsage, runsOnPicker, runsOnLine */
 'use strict';
 
 // On a Mac the app's own shortcuts use Cmd, as Mac apps do, and Ctrl is left to
@@ -66,6 +67,14 @@ function h(spec, attrs, ...kids) {
 }
 
 const ICONS = {
+  clip: 'M10.5 4.5 5.6 9.4a1.4 1.4 0 0 0 2 2l5.2-5.2a2.9 2.9 0 0 0-4.1-4.1L3.4 7.4a4.4 4.4 0 0 0 6.2 6.2l4.6-4.6',
+  file: 'M4 1.5h5.2L12.5 4.8v9.7H4zM9 1.5v3.5h3.5',
+  import: 'M8 2.5v7.5M5 7l3 3 3-3M3 12.5h10',
+  export: 'M8 10V2.5M5 5.5l3-3 3 3M3 12.5h10',
+  cloud: 'M4.5 12.5a3 3 0 0 1-.4-6 4 4 0 0 1 7.8 1 2.5 2.5 0 0 1-.4 5z',
+  memory: 'M4 2.5h6l2.5 2.5v8.5H4zM6 7h4.5M6 9.5h4.5',
+  key: 'M10 6.5a3.5 3.5 0 1 1 1.6 2.94L6.5 14.5H5v1.5H3.5v-2.06l4.56-4.56A3.5 3.5 0 0 1 10 6.5zM12.5 5.5h.01',
+  spark: 'M8 2.5l1.4 4.1 4.1 1.4-4.1 1.4L8 13.5l-1.4-4.1L2.5 8l4.1-1.4z',
   chevron: 'M6 4l4 4-4 4',
   play: 'M5 3.5v9l7-4.5z',
   plus: 'M8 3.5v9M3.5 8h9',
@@ -135,8 +144,11 @@ function closeOverlay() {
 }
 
 // A pop-up menu sits on top of whatever is open: a dialog underneath stays where it is.
+let subTimer = 0; // a submenu about to open on hover
+
 function closeMenu() {
-  document.querySelectorAll('#overlay > .menu, #overlay > .menu-scrim').forEach((el) => el.remove());
+  clearTimeout(subTimer);
+  document.querySelectorAll('#overlay > .menu, #overlay > .menu-scrim, #overlay > .lim-card').forEach((el) => el.remove());
 }
 
 function menu(x, y, items) {
@@ -145,23 +157,34 @@ function menu(x, y, items) {
   for (const it of items.filter(Boolean)) {
     if (it === '-') m.append(h('hr'));
     else if (it.heading) m.append(h('div.menu-label', {}, it.heading));
+    else if (it.info) m.append(h('div.menu-info', {}, h('span', {}, it.info[0]), h('b', {}, it.info[1])));
     else {
-      m.append(
-        h(
-          'button',
-          {
-            class: [it.danger ? 'danger' : '', it.hint ? 'tall' : ''].join(' '),
-            role: 'menuitem',
-            onclick: () => {
-              closeMenu();
-              it.run();
-            },
+      // An item with `sub` opens a menu beside it, on hover or click, and this one stays.
+      const dropSubs = () => document.querySelectorAll('#overlay > .ro-panel').forEach((el) => el.remove());
+      const btn = h(
+        'button',
+        {
+          class: [it.danger ? 'danger' : '', it.hint ? 'tall' : '', it.sub ? 'has-sub' : ''].join(' '),
+          role: 'menuitem',
+          'aria-haspopup': it.sub ? 'menu' : null,
+          onmouseenter: () => {
+            clearTimeout(subTimer);
+            if (it.sub) subTimer = setTimeout(() => it.sub(btn), 140);
+            else subTimer = setTimeout(dropSubs, 140);
           },
-          it.swatch ? h('span.swatch', { style: `background:${it.swatch}` }) : it.icon ? icon(it.icon) : null,
-          it.hint ? h('span.menu-two', {}, h('b', {}, it.label), h('small', {}, it.hint)) : it.label,
-          it.checked ? h('span.menu-check', {}, icon('check')) : null,
-        ),
+          onclick: () => {
+            clearTimeout(subTimer);
+            if (it.sub) return it.sub(btn);
+            closeMenu();
+            it.run();
+          },
+        },
+        it.swatch ? h('span.swatch', { style: `background:${it.swatch}` }) : it.icon ? icon(it.icon) : null,
+        it.hint ? h('span.menu-two', {}, h('b', {}, it.label), h('small', {}, it.hint)) : it.label,
+        it.checked ? h('span.menu-check', {}, icon('check')) : null,
+        it.sub ? h('span.menu-sub', {}, icon('chevron')) : null,
       );
+      m.append(btn);
     }
   }
   const scrim = h('div.scrim.menu-scrim', {
@@ -183,7 +206,7 @@ const menuAt = (el, items) => {
 };
 
 // fields: { key, label, type: text|number|checkbox|textarea|colors|folder, value, hint, placeholder, mono }
-function formDialog({ title, body, fields = [], confirm = 'Save', danger, wide, extra }) {
+function formDialog({ title, body, fields = [], confirm = 'Save', cancel = 'Cancel', danger, wide, extra }) {
   return new Promise((resolve) => {
     closeOverlay();
     const values = {};
@@ -270,7 +293,7 @@ function formDialog({ title, body, fields = [], confirm = 'Save', danger, wide, 
         'div.dialog-actions',
         {},
         extra ? h('button.btn', { type: 'button', style: 'margin-right:auto', onclick: () => done({ __extra: true }) }, extra) : null,
-        h('button.btn', { type: 'button', onclick: () => done(null) }, 'Cancel'),
+        h('button.btn', { type: 'button', onclick: () => done(null) }, cancel),
         h('button.btn', { class: danger ? 'danger' : 'primary', type: 'submit' }, confirm),
       ),
     );
@@ -365,7 +388,7 @@ function accountChip(id, long, onPick) {
 const tabAccountMenu = (tab) => (x, y) => accountMenu(x, y, `Run ${tabTitle(tab)} as`, tab.account, null, (pick) => switchAccount(tab, pick));
 
 function tabTitle(tab) {
-  if (tab.kind === 'login' || tab.kind === 'install') return tab.name;
+  if (tab.kind === 'login' || tab.kind === 'install' || tab.kind === 'agent' || tab.kind === 'agentLogin' || tab.kind === 'agentInstall') return tab.name;
   if (tab.kind === 'shell' && tab.server) return tab.name || 'Server';
   if (tab.kind === 'shell') return 'Terminal';
   const p = projectByDir(tab.dir);
@@ -582,7 +605,7 @@ function renderSidebarHead() {
       {},
       h(
         'button.btn.small.primary',
-        { title: 'Start a session in any folder, on this PC or on a server', onclick: () => startSession(srv) },
+        { title: S.switches.servers ? 'Start a session in any folder, on this PC or on a server' : 'Start a session in any folder', onclick: () => startSession(srv) },
         icon('plus'),
         'New session',
       ),
@@ -599,7 +622,9 @@ function renderList() {
   const projects = visibleProjects();
   const nodes = [];
   for (const p of projects) {
-    const sessions = withSubs(visibleSessions(p));
+    // A Claude session handed to another agent is listed once, as that agent's row.
+    const handedOff = new Set(Object.values(S.config.agentSessions || {}).map((r) => r.memberId));
+    const sessions = withSubs(visibleSessions(p).filter((s) => !handedOff.has(s.id)));
     if ((S.query || S.showHidden) && !sessions.length && !(S.showHidden && !S.query && isHiddenProject(p))) continue;
     const open = S.query ? true : !S.config.collapsed[p.dir];
     const limit = S.expanded[p.dir] || S.query ? Infinity : 6;
@@ -693,7 +718,7 @@ function renderList() {
         'div.project',
         { class: [open ? 'open' : '', p.exists ? '' : 'missing', isHiddenProject(p) ? 'hidden-item' : ''].join(' ') },
         head,
-        open ? h('div.sessions', {}, rows) : null,
+        open ? h('div.sessions', {}, rows, p.server ? null : agentRows(p)) : null,
       ),
     );
   }
@@ -738,6 +763,25 @@ function renderList() {
   );
 }
 
+// A model id as people say it: claude-opus-5-5 -> Opus 5.5. Other ids stay as they are.
+function modelName(id) {
+  const cap = (w) => w[0].toUpperCase() + w.slice(1);
+  const m = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id || '');
+  if (m) return `${cap(m[1])} ${m[2]}${m[3] ? '.' + m[3] : ''}`;
+  const old = /^claude-(\d+)-(\d+)-(opus|sonnet|haiku)/.exec(id || '');
+  if (old) return `${cap(old[3])} ${old[1]}.${old[2]}`;
+  return id || '';
+}
+
+// What a Claude session runs on: the tool, the model of its last reply, and whose login or key.
+function runsOn(p, s) {
+  const llm = !p.server && llmFor(p.dir, s.id);
+  const acct = accountById(accountFor(p.dir, s.id));
+  const model = s.model ? modelName(s.model) : llm ? llmById(llm).model : '';
+  const via = llm ? `${llmName(llm)} API key` : !p.server && multiAccount() && acct ? `${acct.name} account` : '';
+  return ['Claude Code', model, via].filter(Boolean).join(' · ');
+}
+
 function sessionRow(p, s) {
   const tab = tabFor(s.id);
   const lv = S.live.get(s.id);
@@ -746,6 +790,9 @@ function sessionRow(p, s) {
   // working for a phone, or on something a teammate handed them.
   const here = Boolean(lv && (lv.bg || S.held.has(s.id)));
   const elsewhere = lv && !tab && !here;
+  // The Claude desktop app has it: running there now, or used there last (/desktop).
+  const inAppNow = elsewhere && lv.entrypoint === 'claude-desktop';
+  const inApp = !p.server && !tab && (inAppNow || (s.inApp && !lv));
   return h(
     'button.session',
     {
@@ -757,7 +804,7 @@ function sessionRow(p, s) {
         subOf(s.id) ? 'sub' : '',
         subOf(s.id) && subOf(s.id).status !== 'working' ? 'done' : '',
       ].join(' '),
-      title: `${sessionTitle(s)}${S.config.sessionRole[s.id] ? '\nRole: ' + S.config.sessionRole[s.id] : ''}\n${STATUS_WORDS[lamp]}${elsewhere ? ' in another window' : here ? ' in Loop, with no terminal open. Click to open it here.' : ''}${s.lastPrompt ? '\n\nLast prompt: ' + s.lastPrompt : ''}`,
+      title: `${sessionTitle(s)}\n${runsOn(p, s)}${S.config.sessionRole[s.id] ? '\nRole: ' + S.config.sessionRole[s.id] : ''}\n${STATUS_WORDS[lamp]}${inAppNow ? ' in the Claude app' : elsewhere ? ' in another window' : here ? ' in Loop, with no terminal open. Click to open it here.' : ''}${inApp && !inAppNow ? '\nLast used in the Claude app. Opening it here moves it to Loop.' : ''}${s.lastPrompt ? '\n\nLast prompt: ' + s.lastPrompt : ''}`,
       onclick: () => openSession(p, s),
       oncontextmenu: (e) => {
         e.preventDefault();
@@ -769,6 +816,7 @@ function sessionRow(p, s) {
     isPinned(s) ? h('span.pin', { title: 'Pinned' }, icon('pin')) : null,
     // A session on a server runs as the server's own login, whatever this PC's accounts are.
     !p.server && S.config.sessionAccount[s.id] && accountById(S.config.sessionAccount[s.id]) ? accountChip(S.config.sessionAccount[s.id]) : null,
+    !p.server && llmFor(p.dir, s.id) ? llmChip(llmFor(p.dir, s.id)) : null,
     S.showHidden && isHiddenSession(s)
       ? h(
           'span.tag.act',
@@ -783,7 +831,9 @@ function sessionRow(p, s) {
           },
           'Unhide',
         )
-      : elsewhere
+      : inApp
+        ? h('span.tag.app', { title: inAppNow ? 'Open in the Claude app right now' : 'Last used in the Claude app' }, inAppNow ? 'in Claude app' : 'Claude app')
+        : elsewhere
         ? h('span.tag', {}, p.server ? 'running' : 'elsewhere')
         : here
           ? h('span.tag.mine', { title: 'Running in the background for Loop. Click to open its terminal.' }, 'in Loop')
@@ -826,12 +876,14 @@ function projectMenu(x, y, p) {
   menu(x, y, [
     { label: 'Open pinned sessions', icon: 'play', run: () => openPinned([p]) },
     { label: 'New session', icon: 'plus', run: () => newSession(p) },
+    p.server ? null : { label: 'New session with another AI', icon: 'spark', run: () => agentPickMenu(x, y, p) },
     { label: 'Open terminal here', icon: 'terminal', run: () => openShell(p) },
     p.server ? null : { label: 'Board', icon: 'board', run: () => openBoard(p) },
     p.server ? null : { label: teamOf(p.dir) ? 'Team' : 'Create a team', icon: 'team', run: () => openTeamSetup(p) },
     p.server ? null : { label: 'Project memory', icon: 'book', run: () => openDrawer(p.dir, null) },
     '-',
     { label: 'Move to workspace', icon: 'move', run: () => moveMenu(x, y, p) },
+    p.server ? null : { label: `Model: ${llmName(llmFor(p.dir, null))}`, icon: 'spark', run: () => projectLlmMenu(x, y, p) },
     multiAccount() && !p.server
       ? {
           label: `Account: ${accountById(accountFor(p.dir, null)).name}`,
@@ -962,29 +1014,10 @@ function sessionMenu(x, y, p, s) {
         renderList();
       },
     },
-    multiAccount() && !p.server
-      ? {
-          label: `Account: ${accountById(tab ? tab.account : accountFor(p.dir, s.id)).name}`,
-          icon: 'person',
-          run: () =>
-            accountMenu(
-              x,
-              y,
-              `Run ${sessionTitle(s)} as`,
-              tab ? tab.account : accountFor(p.dir, s.id),
-              S.config.sessionAccount[s.id] ? 'Follow the project' : null,
-              (id) => {
-                if (id) S.config.sessionAccount[s.id] = id;
-                else delete S.config.sessionAccount[s.id];
-                save();
-                const open = tabFor(s.id);
-                if (open) switchAccount(open, accountFor(p.dir, s.id));
-                else renderList();
-              },
-            ),
-        }
-      : null,
-    p.server ? null : { label: 'Talk to it (voice mode)', icon: 'mic', run: () => openVoice(p, s) },
+    { label: 'Rename', icon: 'pencil', run: () => renameSession(s) },
+    p.server ? null : '-',
+    p.server ? null : { label: 'Runs on', hint: runsOnLine(p, { id: s.id, name: sessionTitle(s), agent: 'claude' }), icon: 'spark', sub: (el) => runsOnPicker(el, p, { id: s.id, name: sessionTitle(s), agent: 'claude' }) },
+    p.server ? null : '-',
     p.server ? null : { label: 'Peek at the last messages', icon: 'eye', run: () => peekSession(p, s) },
     !p.server && !subOf(s.id) ? { label: 'New sub-session…', icon: 'plus', run: () => subDialog(p, s) } : null,
     subOf(s.id) && subOf(s.id).result ? { label: 'What it handed back', icon: 'book', run: () => formDialog({ title: subOf(s.id).name, body: subOf(s.id).result + (subOf(s.id).branch ? `
@@ -1000,49 +1033,7 @@ Branch: ${subOf(s.id).branch}` : ''), confirm: 'Close' }) } : null,
           },
         }
       : null,
-    p.server ? null : { label: 'Knowledge base', icon: 'book', run: () => openDrawer(p.dir, s.id) },
-    !p.server && teamOf(p.dir) ? { label: `Team role${roleOf(p.dir, s.id) ? ': ' + roleOf(p.dir, s.id).title : ''}`, icon: 'team', run: () => roleMenu(x, y, p, s) } : null,
-    !p.server && teamOf(p.dir) ? null : {
-      label: S.config.sessionRole[s.id] ? 'Change role' : 'Set role',
-      icon: 'person',
-      run: async () => {
-        const v = await formDialog({
-          title: `Role of ${sessionTitle(s)}`,
-          body: 'One line on what this session is responsible for. Teammates see it when they look up who to ask, and the session is told it when it starts here.',
-          fields: [
-            { key: 'role', label: 'Role', value: S.config.sessionRole[s.id] || '', placeholder: 'Backend developer: owns the API and database migrations' },
-          ],
-        });
-        if (!v) return;
-        if (v.role.trim()) S.config.sessionRole[s.id] = v.role.trim().slice(0, 300);
-        else delete S.config.sessionRole[s.id];
-        save();
-        renderList();
-      },
-    },
-    {
-      label: 'Rename',
-      icon: 'pencil',
-      run: async () => {
-        const v = await formDialog({
-          title: 'Rename session',
-          body: 'This changes the label in Loop only. Use /rename inside the session to change the name other sessions see.',
-          fields: [{ key: 'name', label: 'Name', value: sessionTitle(s) }],
-        });
-        if (!v) return;
-        if (v.name.trim() && v.name.trim() !== s.title) S.config.sessionAlias[s.id] = v.name.trim();
-        else delete S.config.sessionAlias[s.id];
-        save();
-        renderAll();
-      },
-    },
-    '-',
-    { label: 'Copy session ID', icon: 'copy', run: () => deck.clipWrite(s.id) },
-    p.server ? null : {
-      label: 'Copy resume command',
-      icon: 'copy',
-      run: () => deck.clipWrite(`${S.config.settings.claudeCmd} ${S.config.settings.flags} --resume ${s.id}`.replace(/\s+/g, ' ')),
-    },
+    { label: 'More', icon: 'dots', run: () => sessionMoreMenu(x, y, p, s) },
     '-',
     {
       label: isHiddenSession(s) ? 'Unhide session' : 'Hide session',
@@ -1055,6 +1046,57 @@ Branch: ${subOf(s.id).branch}` : ''), confirm: 'Close' }) } : null,
     },
     p.server ? null : { label: 'Delete session', icon: 'trash', danger: true, run: () => deleteSession(p, s) },
   ]);
+}
+
+// The items a session needs now and then, one step away.
+function sessionMoreMenu(x, y, p, s) {
+  menu(x, y, [
+    { heading: sessionTitle(s) },
+    p.server ? null : { label: 'Knowledge base', icon: 'book', run: () => openDrawer(p.dir, s.id) },
+    !p.server && teamOf(p.dir) ? { label: `Team role${roleOf(p.dir, s.id) ? ': ' + roleOf(p.dir, s.id).title : ''}`, icon: 'team', run: () => roleMenu(x, y, p, s) } : null,
+    !p.server && teamOf(p.dir)
+      ? null
+      : {
+          label: S.config.sessionRole[s.id] ? 'Change role' : 'Set role',
+          icon: 'person',
+          run: async () => {
+            const v = await formDialog({
+              title: `Role of ${sessionTitle(s)}`,
+              body: 'One line on what this session is responsible for. Teammates see it when they look up who to ask, and the session is told it when it starts here.',
+              fields: [{ key: 'role', label: 'Role', value: S.config.sessionRole[s.id] || '', placeholder: 'Backend developer: owns the API and database migrations' }],
+            });
+            if (!v) return;
+            if (v.role.trim()) S.config.sessionRole[s.id] = v.role.trim().slice(0, 300);
+            else delete S.config.sessionRole[s.id];
+            save();
+            renderList();
+          },
+        },
+    '-',
+    { label: 'Copy session ID', icon: 'copy', run: () => deck.clipWrite(s.id) },
+    p.server ? null : { label: 'Copy resume command', icon: 'copy', run: () => deck.clipWrite(`${S.config.settings.claudeCmd} ${S.config.settings.flags} --resume ${s.id}`.replace(/\s+/g, ' ')) },
+  ]);
+}
+
+async function renameSession(s) {
+  const v = await formDialog({
+    title: 'Rename session',
+    body: 'One name everywhere: here, in the Claude app, in /resume and on Remote Control.',
+    fields: [{ key: 'name', label: 'Name', value: sessionTitle(s) }],
+  });
+  const name = v && v.name.replace(/\s+/g, ' ').trim();
+  if (!name || name === sessionTitle(s)) return;
+  const tab = tabFor(s.id);
+  const { p } = sessionById(s.id);
+  // Open here: the session renames itself. Otherwise the name goes into its file.
+  if (tab && !tab.exited && isClaudeTab(tab) && !tab.agent) deck.write(tab.id, `/rename ${name}\r`);
+  else if (!p || p.server || !(await deck.renameInFile({ dir: p.dir, sessionId: s.id, name }))) return toast('Could not rename this session.', true);
+  delete S.config.sessionAlias[s.id];
+  s.title = name;
+  s.named = s.titled = true;
+  if (tab) tab.name = name;
+  save();
+  renderAll();
 }
 
 // Move a session's saved conversation to the Recycle Bin and forget what Loop kept about it.
@@ -1074,7 +1116,7 @@ async function deleteSession(p, s) {
   if (!(await deck.sessionTrash({ dir: p.dir, sessionId: s.id, title: `${title} (${projectTitle(p)})` }))) {
     return toast('Could not delete it. If it is still running, close it and try again.', true);
   }
-  for (const key of ['sessionAlias', 'sessionRole', 'sessionAccount']) if (S.config[key]) delete S.config[key][s.id];
+  for (const key of ['sessionAlias', 'sessionRole', 'sessionAccount', 'sessionLlm', 'sessionModel']) if (S.config[key]) delete S.config[key][s.id];
   for (const key of ['pinnedSessions', 'hiddenSessions']) S.config[key] = S.config[key].filter((id) => id !== s.id);
   const t = teamOf(p.dir);
   if (t) delete t.members[s.id];
@@ -1268,6 +1310,12 @@ async function createTabs(specs) {
 function createTab(o, activateIt = true) {
   const id = o.id || `t${S.winId}_${++tabSeq}`;
   const termEl = h('div.pane-term');
+  // A resumed session starts with its name, so it shows the same name in its
+  // prompt, its terminal title and on Remote Control as it does here.
+  if (o.kind === 'resume' && !o.name && !o.server && !o.adopt) {
+    const { s } = sessionById(o.sessionId);
+    if (s && (s.titled || S.config.sessionAlias[s.id])) o = { ...o, name: sessionTitle(s) };
+  }
   const tab = { id, ...o, exited: false, attention: false, started: false, pending: [], pendingSize: 0, held: false };
   tab.account = o.account || accountFor(o.dir, o.sessionId);
   tab.head = h('div.pane-head');
@@ -1384,6 +1432,8 @@ function createTab(o, activateIt = true) {
   S.order.push(id);
   $('#panes').append(tab.pane);
   term.open(termEl);
+  setupChat(tab, termEl); // the same session as a chat, one switch away
+  touchScroll(tab, termEl);
   try {
     const gl = new WebglAddon.WebglAddon();
     gl.onContextLoss(() => gl.dispose()); // back to the DOM renderer
@@ -1441,6 +1491,12 @@ async function startTab(tab) {
     title: tabTitle(tab),
     account: tab.account,
     server: tab.server,
+    agent: tab.agent,
+    agentAccount: tab.agentAccount,
+    agentSession: tab.agentSession,
+    memberId: tab.memberId,
+    native: tab.native,
+    cont: tab.cont,
     cols: tab.term.cols,
     rows: tab.term.rows,
   });
@@ -1465,6 +1521,7 @@ function focusActive() {
 
 function activate(id) {
   if (!S.tabs.has(id)) return;
+  phoneNav(false);
   S.active = id;
   S.tabs.get(id).attention = false;
   renderTabs();
@@ -1483,6 +1540,8 @@ function activate(id) {
 // everything it printed meanwhile. `stop` ends it instead, and `force` is for
 // one that will not end.
 async function closeTab(id, how) {
+  const leaving = S.tabs.get(id);
+  if (leaving && leaving.chat) clearInterval(leaving.chat.timer);
   const tab = S.tabs.get(id);
   if (!tab) return;
   const o = how === true ? { stop: true } : how || {};
@@ -1737,8 +1796,8 @@ function remoteSwitch(tab) {
 function tabsChanged() {
   S.config.lastOpen = S.order
     .map((id) => S.tabs.get(id))
-    .filter(isClaudeTab)
-    .map((t) => (t.server ? { dir: t.dir, sessionId: t.sessionId, server: t.server, cwd: t.cwd } : { dir: t.dir, sessionId: t.sessionId }));
+    .filter((t) => isClaudeTab(t) || (t.kind === 'agent' && t.agentSession))
+    .map((t) => (t.kind === 'agent' ? { agentSession: t.agentSession } : t.server ? { dir: t.dir, sessionId: t.sessionId, server: t.server, cwd: t.cwd } : { dir: t.dir, sessionId: t.sessionId }));
   save();
   renderTabs();
   layoutPanes();
@@ -1749,6 +1808,7 @@ function tabsChanged() {
 }
 
 async function openSession(p, s) {
+  phoneNav(false); // on a phone, picking a session shows it
   const existing = tabFor(s.id);
   if (existing) return activate(existing.id);
   // A terminal of ours that is running with no window: take it back, with
@@ -1772,10 +1832,19 @@ async function openSession(p, s) {
     for (let i = 0; i < 20 && S.live.has(s.id); i++) await new Promise((r) => setTimeout(r, 100));
     return createTab({ kind: 'resume', dir: p.dir, cwd: p.path, sessionId: s.id });
   }
-  // Running somewhere else - another terminal, the Claude desktop app - is no
-  // reason to ask: it is the same conversation on disk and it is yours. The
-  // copy there stops and this one carries on from the file, as it does when you
-  // open a session from the phone or the web.
+  // Open in the Claude desktop app right now: that is someone's window, so ask.
+  // Continuing here moves it, as /desktop moves a session the other way.
+  if (lv && lv.entrypoint === 'claude-desktop') {
+    const ok = await confirmBox({
+      title: `"${sessionTitle(s)}" is open in the Claude app`,
+      body: 'Continue in Loop moves it into a terminal here: the Claude app stops its copy, and the conversation carries on from where it is. The Claude app will still list it in its sidebar.',
+      confirm: 'Continue in Loop',
+    });
+    if (!ok) return;
+  }
+  // Running in another terminal is no reason to ask: it is the same
+  // conversation on disk and it is yours. The copy there stops and this one
+  // carries on from the file, as it does when you open a session from the phone.
   if (lv) {
     const where = whereItRuns(lv);
     if (!(await deck.closeElsewhere(s.id))) {
@@ -1785,6 +1854,8 @@ async function openSession(p, s) {
   }
   // If it is running in the background for the phone, that stops first.
   await deck.directStop(s.id);
+  if (!lv && s.inApp) toast('Moved here from the Claude app.');
+  s.inApp = false;
   createTab({ kind: 'resume', dir: p.dir, cwd: p.path, sessionId: s.id });
 }
 
@@ -1814,13 +1885,37 @@ async function newSession(p) {
             options: accountList().map((a) => ({ value: a.id, label: a.name })),
           }
         : null,
+      installedAgents().length
+        ? {
+            key: 'agent',
+            label: 'Agent',
+            type: 'select',
+            value: '',
+            options: [{ value: '', label: 'Claude Code' }, ...installedAgents().map((a) => ({ value: a.id, label: `${a.name} (${a.tool})` }))],
+          }
+        : null,
+      S.llms.length
+        ? {
+            key: 'llm',
+            label: 'Model',
+            type: 'select',
+            value: llmFor(p.dir, null),
+            options: [{ value: '', label: 'Claude' }, ...S.llms.map((m) => ({ value: m.id, label: m.name }))],
+          }
+        : null,
     ].filter(Boolean),
     confirm: 'Start session',
   });
   if (!v) return;
+  if (v.agent) return newAgentSession(p, v.agent, v.name.trim());
   const sessionId = crypto.randomUUID();
   if (v.account && v.account !== accountFor(p.dir, null)) {
     S.config.sessionAccount[sessionId] = v.account;
+    save();
+  }
+  if (S.llms.length && v.llm !== llmFor(p.dir, null)) {
+    // Claude, picked in a project set to another model, is a choice of its own.
+    S.config.sessionLlm[sessionId] = v.llm || 'claude';
     save();
   }
   createTab({ kind: 'new', dir: p.dir, cwd: p.path, sessionId, name: v.name.trim() });
@@ -1869,6 +1964,11 @@ async function openPinned(projects) {
 function reopenLast(quiet) {
   const specs = [];
   for (const it of S.config.lastOpen.slice()) {
+    if (it.agentSession) {
+      const rec = S.config.agentSessions[it.agentSession];
+      if (rec && !agentTabFor(rec.id)) openAgentSession(rec, false);
+      continue;
+    }
     if (it.server) continue; // put back once its server has reported, see restoreFar
     const p = projectByDir(it.dir);
     const s = p && p.sessions.find((x) => x.id === it.sessionId);
@@ -1894,7 +1994,14 @@ function setFontSize(size) {
   }
 }
 
+// A phone-sized window: the project list and the session take turns.
+const narrow = () => matchMedia('(max-width: 760px)').matches;
+function phoneNav(on) {
+  document.body.classList.toggle('phone-nav', Boolean(on) && narrow());
+}
+
 function toggleSidebar() {
+  if (narrow()) return phoneNav(!document.body.classList.contains('phone-nav'));
   S.config.sidebarHidden = !S.config.sidebarHidden;
   save();
   document.body.classList.toggle('no-sidebar', S.config.sidebarHidden);
@@ -1904,6 +2011,9 @@ function toggleSidebar() {
 function renderEmpty() {
   const empty = $('#empty');
   empty.hidden = S.order.length > 0;
+  // Nothing open: on a phone, show the list (once, as it empties).
+  if (!empty.hidden && !renderEmpty.shown) phoneNav(true);
+  renderEmpty.shown = !empty.hidden;
   if (empty.hidden) return;
   const last = S.config.lastOpen.length;
   put(
@@ -1978,8 +2088,8 @@ function renderTools() {
         tool(`Talk to the session in front: it listens and answers out loud  ${MOD}+Shift+V`, 'mic', voiceOn(), toggleVoice),
         tool(`Broadcast one prompt to several sessions  ${MOD}+Shift+B`, 'broadcast', S.composerOpen, toggleComposer),
         tool(`Memory and tasks  ${MOD}+Shift+M`, 'book', S.drawer.open, toggleDrawer),
-        tool('Servers: run sessions on another machine', 'server', false, openServers),
-        tool('Your phone: work on these sessions from the Loop app', 'phone', PH.info.phones > 0, openPhone),
+        S.switches.servers ? tool('Servers: run sessions on another machine', 'server', false, openServers) : null,
+        S.switches.phone ? tool('Your phone: work on these sessions from the Loop app', 'phone', PH.info.phones > 0, openPhone) : null,
       ),
       h(
         'button.me',
@@ -2176,88 +2286,7 @@ function nextWaiting() {
   if (ids.length) activate(ids[0]);
 }
 
-function renderStatus() {
-  const all = [...S.live.values()];
-  const working = all.filter((l) => l.status !== 'idle').length;
-  const idle = all.length - working;
-  const elsewhere = all.filter((l) => !tabFor(l.sessionId) && !l.bg).length;
-  const s = S.config.settings;
-  const front = S.tabs.get(S.active);
-  const frontAcct = accountById(front && front.kind !== 'login' ? front.account : accountFor(null, null)) || accountById('default');
-  put(
-    $('#statusbar'),
-    h(
-      'button.stat.who',
-      {
-        style: `--acct:${frontAcct.color}`,
-        title:
-          front && isClaudeTab(front)
-            ? 'The account this session runs as. Click to switch it to another one.'
-            : 'The account new sessions use. Click to manage accounts.',
-        onclick: (e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          if (front && isClaudeTab(front)) tabAccountMenu(front)(r.left, r.top - 8 - 34 * (accountList().length + 3));
-          else openAccounts();
-        },
-      },
-      h('span.dot'),
-      h('b', {}, frontAcct.name),
-      h('span', {}, accountLine(frontAcct.id)),
-    ),
-    h('span.stat', {}, h('span.lamp.busy'), `${working} working`),
-    h('span.stat', {}, h('span.lamp.idle'), `${idle} idle`),
-    elsewhere
-      ? h('span.stat', { title: 'Running in other terminal windows or the Claude desktop app' }, h('span.lamp'), `${elsewhere} in other windows`)
-      : null,
-    waitingTabs().length
-      ? h(
-          'button.stat.ready',
-          { title: `Sessions that finished while you were elsewhere. Click to go to the next one (${MOD}+Shift+N).`, onclick: nextWaiting },
-          `${waitingTabs().length} ready for you`,
-        )
-      : null,
-    h(
-      'span.right',
-      {},
-      h('span', { id: 'usage' }),
-      h('code', { title: 'Command used to open sessions. Change it in Settings.' }, `${s.claudeCmd} ${s.flags}`.trim()),
-    ),
-  );
-  renderUsage();
-}
-
 const gb = (bytes) => (bytes / 1073741824).toFixed(1);
-
-// Processor, memory and graphics card load for the whole PC; hover for Loop's own share.
-function renderUsage() {
-  const el = $('#usage');
-  const u = S.stats;
-  if (!el || !u) return;
-  const mem = Math.round((100 * u.memUsed) / u.memTotal);
-  const meter = (label, value, pct) => h('span.meter', { class: pct >= 90 ? 'hot' : pct >= 75 ? 'warm' : '' }, h('i', {}, label), value);
-  put(
-    el,
-    meter('CPU', `${u.cpu}%`, u.cpu),
-    meter('RAM', `${gb(u.memUsed)} / ${gb(u.memTotal)} GB`, mem),
-    u.gpu ? meter('GPU', `${u.gpu.load}%`, u.gpu.load) : null,
-  );
-  const front = S.tabs.get(S.active);
-  const far = front && front.server && S.srv.get(front.server);
-  if (far && far.load) {
-    const l = far.load;
-    el.prepend(
-      h(
-        'span.meter.far',
-        { title: `${serverById(front.server).name}: ${l.cores} processor cores` },
-        h('i', {}, serverById(front.server).name),
-        `${l.cpu}%  ${gb(l.memUsed)} / ${gb(l.memTotal)} GB`,
-      ),
-    );
-  }
-  el.title =
-    `Whole PC. Loop itself: ${u.appCpu}% of the processor, ${gb(u.appMem)} GB of memory. Running sessions are separate programs and count toward the PC totals.` +
-    (u.gpu ? `\nGraphics memory in use: ${u.gpu.used} of ${u.gpu.total} MB.` : '');
-}
 
 // ---------- settings ----------
 
@@ -2283,6 +2312,7 @@ async function openSettings() {
       },
       { key: 'fontSize', label: 'Terminal text size', type: 'number', value: s.fontSize },
       { key: 'memoryEnabled', label: 'Give sessions opened here access to project memory', type: 'checkbox', value: s.memoryEnabled !== false },
+
       {
         key: 'memoryDir',
         label: 'Memory folder',
@@ -2294,9 +2324,31 @@ async function openSettings() {
       { key: 'notify', label: 'Notify me when a session finishes while I am in another window', type: 'checkbox', value: s.notify !== false },
       { key: 'restoreOnStart', label: 'Reopen the sessions from last time when Loop starts', type: 'checkbox', value: Boolean(s.restoreOnStart) },
       { key: 'fastGpu', label: 'Draw on the high-performance graphics card (applies after a restart)', type: 'checkbox', value: s.fastGpu !== false },
+      {
+        key: 'viewDesktop',
+        label: 'Open sessions on this PC as',
+        type: 'select',
+        value: s.viewDesktop || 'terminal',
+        options: [
+          { value: 'terminal', label: 'A terminal' },
+          { value: 'chat', label: 'A chat' },
+        ],
+      },
+      {
+        key: 'viewRemote',
+        label: 'Open sessions in a browser or on a phone as',
+        type: 'select',
+        value: s.viewRemote || 'chat',
+        options: [
+          { value: 'chat', label: 'A chat' },
+          { value: 'terminal', label: 'A terminal' },
+        ],
+      },
       ...(await voiceField()),
     ],
+    extra: 'Accessible on the internet…',
   });
+  if (v && v.__extra) return openInternet();
   if (!v) return;
   S.config.settings = {
     ...s,
@@ -2363,7 +2415,7 @@ function syncDrawerToActive() {
   if (tab.dir === S.drawer.dir && (tab.sessionId || null) === S.drawer.member) return;
   S.drawer.dir = tab.dir;
   S.drawer.member = tab.sessionId || null;
-  if (!['project', 'claude', 'tasks'].includes(S.drawer.scope)) S.drawer.scope = S.drawer.member || 'project';
+  if (S.drawer.scope !== 'project') S.drawer.scope = S.drawer.member || 'project';
   loadNotes();
 }
 
@@ -2401,6 +2453,10 @@ function renderDrawer() {
   const d = S.drawer;
   box.hidden = !d.open;
   if (!d.open) return;
+  if (d.scope !== 'project' && d.scope !== d.member) {
+    d.scope = d.member || 'project';
+    return loadNotes();
+  }
   const p = projectByDir(d.dir);
   const search = h('input', {
     type: 'text',
@@ -2414,104 +2470,32 @@ function renderDrawer() {
   });
   const hadFocus = document.activeElement && document.activeElement.closest('#drawer .search');
   const st = d.stats || { notes: 0, tokens: 0 };
+  const notesScope = !['tasks', 'bg'].includes(d.scope);
+  const tab = d.member ? [...S.tabs.values()].find((t) => t.sessionId === d.member || t.memberId === d.member) : null;
   put(
     box,
     h(
-      'div.drawer-head',
+      'div.mem-head',
       {},
-      h('div.row', {}, h('h2', {}, p ? projectTitle(p) : 'Memory'), h('button.mini', { title: 'Close', onclick: toggleDrawer }, icon('x'))),
       h(
-        'p',
+        'div.mem-title',
         {},
-        d.scope === 'project'
-          ? 'Shared by every session in this project'
-          : d.scope === 'bg'
-            ? 'What this session left running: it keeps going while you talk'
-            : d.scope === 'tasks'
-              ? 'Who is doing what. Sessions update it as they work'
-              : d.scope === 'claude'
-                ? 'Saved by Claude Code on its own. Searchable here, read-only'
-                : `What ${memberLabel(d.member)} knows, kept across restarts`,
+        h('span.mem-mark', {}, icon('memory')),
+        h('div.grow', {}, h('h2', {}, 'Memory'), h('small', {}, p ? projectTitle(p) : 'Memory', d.member ? ` · ${memberLabel(d.member)}` : '')),
+        h('button.mini', { title: 'Close', 'aria-label': 'Close memory', onclick: toggleDrawer }, icon('x')),
       ),
-      h(
-        'div.scope',
-        {},
-        h(
-          'button',
-          {
-            class: d.scope === 'project' ? 'on' : '',
-            onclick: () => {
-              d.scope = 'project';
-              loadNotes();
-            },
-          },
-          'Project',
-        ),
-        d.member
-          ? h(
-              'button',
-              {
-                class: d.scope === d.member ? 'on' : '',
-                title: memberLabel(d.member),
-                onclick: () => {
-                  d.scope = d.member;
-                  loadNotes();
-                },
-              },
-              memberLabel(d.member),
-            )
-          : null,
-        d.counts && d.counts.claude
-          ? h(
-              'button',
-              {
-                class: d.scope === 'claude' ? 'on' : '',
-                title: 'Notes Claude Code saved for this project on its own',
-                onclick: () => {
-                  d.scope = 'claude';
-                  loadNotes();
-                },
-              },
-              'Claude notes',
-            )
-          : null,
-        h(
-          'button',
-          {
-            class: d.scope === 'tasks' ? 'on' : '',
-            title: 'The project task board',
-            onclick: () => {
-              d.scope = 'tasks';
-              loadNotes();
-            },
-          },
-          'Tasks',
-        ),
-        d.member
-          ? h(
-              'button',
-              {
-                class: d.scope === 'bg' ? 'on' : '',
-                title: 'Commands and agents this session left running',
-                onclick: () => {
-                  d.scope = 'bg';
-                  loadNotes();
-                },
-              },
-              'Running',
-            )
-          : null,
-      ),
-      h(
-        'div.row',
-        {},
-        d.scope === 'bg' ? h('div', { style: 'flex:1' }) : h('label.search', { style: 'flex:1' }, icon('search'), search),
-        d.scope === 'bg'
-          ? h('button.btn.small', { onclick: loadNotes }, icon('refresh'), 'Refresh')
-          : d.scope === 'tasks'
-          ? h('button.btn.small', { onclick: () => editTask(null) }, icon('plus'), 'Task')
-          : h('button.btn.small', { onclick: () => editNote(null) }, icon('plus'), 'Note'),
-      ),
+      memTabs(d),
+      notesScope
+        ? h(
+            'div.mem-tools',
+            {},
+            h('label.search', {}, icon('search'), search),
+            h('button.btn.small.primary', { onclick: () => editNote(null) }, icon('plus'), 'Note'),
+          )
+        : d.scope === 'tasks'
+          ? h('div.mem-tools', {}, h('label.search', {}, icon('search'), search), h('button.btn.small.primary', { onclick: () => editTask(null) }, icon('plus'), 'Task'))
+          : h('div.mem-tools', {}, h('span.grow.mem-hint', {}, 'What this session left running'), h('button.btn.small', { onclick: loadNotes }, icon('refresh'), 'Refresh')),
+      notesScope ? h('p.mem-about', {}, scopeAbout(d)) : null,
     ),
     h(
       'div.drawer-body',
@@ -2521,46 +2505,35 @@ function renderDrawer() {
         : d.scope === 'tasks'
           ? taskNodes(d)
           : d.notes.length
-          ? d.notes.map((n) =>
-              h(
-                'div.note',
-                { onclick: () => (n.readOnly ? viewNote(n) : editNote(n)) },
-                h('h4', {}, h('span', {}, n.title), h('em', {}, ago(n.updated))),
-                h('p', {}, n.snippet || n.body),
+            ? d.notes.map((n) =>
                 h(
-                  'div.meta',
-                  {},
-                  (n.tags || []).map((t) => h('b', {}, t)),
-                  h('span', {}, `${n.tokens} tokens`),
-                  n.author ? h('span', {}, `by ${n.author}`) : null,
+                  'button.mem-note',
+                  { onclick: () => (n.readOnly ? viewNote(n) : editNote(n)) },
+                  h('div.mem-note-top', {}, h('b', {}, n.title), h('em', {}, ago(n.updated))),
+                  h('p', {}, n.snippet || n.body),
+                  (n.tags || []).length ? h('div.mem-tags', {}, n.tags.slice(0, 4).map((t) => h('span', {}, t))) : null,
                 ),
+              )
+            : h(
+                'div.mem-empty',
+                {},
+                h('span.mem-mark.big', {}, icon('memory')),
+                h('b', {}, d.query ? 'No matching notes' : 'No notes yet'),
+                h(
+                  'p',
+                  {},
+                  d.query
+                    ? `Nothing here matches "${d.query}".`
+                    : d.scope === 'project'
+                      ? 'Sessions in this project save decisions and facts here as they work. Add one yourself, or import what your agents already know.'
+                      : d.scope === 'company'
+                        ? 'Notes every project can read: policies, brand, how you work.'
+                        : 'This session saves what it learns here, whichever agent is working in it.',
+                ),
+                !d.query && p && !p.server ? h('button.btn.small', { onclick: () => openImport(p) }, icon('import'), 'Import memories') : null,
               ),
-            )
-          : h(
-              'div.side-empty',
-              {},
-              d.query
-                ? `Nothing in memory matches "${d.query}".`
-                : d.scope === 'claude'
-                  ? 'Claude Code has not saved any notes of its own for this project.'
-                  : d.scope === 'project'
-                    ? 'No project memory yet. Sessions opened here save decisions and facts as they work, or add a note yourself.'
-                    : 'This session has not saved anything yet. It keeps its own notes here as it learns.',
-            ),
     ),
-    h(
-      'div.drawer-foot',
-      {},
-      h(
-        'span.grow',
-        { title: `Stored in ${S.memoryRoot}` },
-        d.scope === 'tasks'
-          ? `${(d.taskStats || {}).open || 0} open, ${(d.taskStats || {}).done || 0} done`
-          : `${st.notes} note${st.notes === 1 ? '' : 's'}, about ${st.tokens} tokens`,
-      ),
-      h('button.link', { title: S.memoryRoot, onclick: () => deck.memReveal(d.dir) }, 'Open folder'),
-      h('button.link', { title: 'Choose where memory is kept', onclick: openSettings }, 'Move'),
-    ),
+    notesScope ? memStorage(d, p, st) : null,
   );
   if (hadFocus) {
     search.focus();
@@ -2684,7 +2657,7 @@ async function editTask(task) {
 async function editNote(note) {
   const d = S.drawer;
   const v = await formDialog({
-    title: note ? 'Edit note' : d.scope === 'project' ? 'New project note' : `New note for ${memberLabel(d.member)}`,
+    title: note ? 'Edit note' : d.scope === 'project' ? 'New project note' : d.scope === 'company' ? 'New company note' : `New note for ${memberLabel(d.member)}`,
     wide: true,
     fields: [
       { key: 'title', label: 'Title', value: note ? note.title : '', placeholder: 'Deploy goes through the staging box first' },
@@ -2745,6 +2718,12 @@ function renderAll() {
 
 async function rescan(announce) {
   S.local = await deck.scan();
+  const dirs = S.local.filter((p) => !p.server && p.exists).map((p) => p.dir);
+  if (S.knownDirs) {
+    const fresh = dirs.find((d) => !S.knownDirs.has(d));
+    if (fresh && S.cloud && S.cloud.signedIn) setTimeout(() => cloudBringOffer(true, fresh).catch(() => {}), 1200);
+  } else if (S.cloud && S.cloud.signedIn) setTimeout(() => cloudBringOffer(true).catch(() => {}), 4000); // once at start
+  S.knownDirs = new Set(dirs);
   mergeProjects();
   renderRail();
   renderList();
@@ -2827,12 +2806,15 @@ window.addEventListener('focus', () => {
 
   const state = await loading;
   S.config = state.config;
+  S.switches = state.switches || {};
   S.local = state.projects;
   S.projects = state.projects;
   S.colors = state.colors;
   S.winBuild = state.winBuild;
   S.winId = state.winId;
   S.child = state.child;
+  S.remote = Boolean(state.remote); // this window is a browser elsewhere
+  document.body.classList.toggle('remote', S.remote);
   document.body.classList.toggle('child', S.child);
   document.body.classList.toggle('mac', deck.platform === 'darwin');
   if (S.child) S.config.layout = 'focus';
@@ -2844,6 +2826,13 @@ window.addEventListener('focus', () => {
   S.config.mainAccount = S.config.mainAccount || { name: 'Main', color: S.colors[0] };
   S.config.projectAccount = S.config.projectAccount || {};
   S.config.sessionAccount = S.config.sessionAccount || {};
+  S.config.sessionLlm = S.config.sessionLlm || {};
+  S.config.projectLlm = S.config.projectLlm || {};
+  S.llms = await deck.llmList();
+  S.config.agentSessions = S.config.agentSessions || {};
+  S.agents = [];
+  refreshAgents();
+  setTimeout(() => memoryMoveOffer().catch(() => {}), 4000);
   S.config.sessionRemote = S.config.sessionRemote || {};
   S.config.servers = S.config.servers || [];
   S.config.projectTeam = S.config.projectTeam || {};
@@ -2879,6 +2868,9 @@ window.addEventListener('focus', () => {
   });
   wireWindows();
   wireServers();
+  wireCloud();
+  wireInternet();
+  wireLimits();
   wireBoard();
   wirePhone();
   deck.trashList().then((t) => {
@@ -2895,9 +2887,109 @@ window.addEventListener('focus', () => {
   renderAll();
   if (state.memoryWarning) toast(state.memoryWarning, true);
   for (const spec of state.adopt || []) createTab({ ...spec, adopt: true });
-  if (!S.child && S.config.settings.restoreOnStart && S.config.lastOpen.length) {
+  if (!S.child && !S.remote && S.config.settings.restoreOnStart && S.config.lastOpen.length) {
     S.bootOpen = S.config.lastOpen.filter((it) => it.server);
     reopenLast(true);
   }
   setInterval(() => document.hidden || rescan(false), 30000); // nobody is looking while it is hidden
 })();
+
+
+// ---------- the memory sidebar's parts ----------
+
+function memTabs(d) {
+  const c = (d.counts && d.counts.byScope) || {};
+  const tabs = [
+    d.member ? { key: d.member, label: 'Session', n: c[d.member], tip: `${memberLabel(d.member)}'s own memory. Every agent working in this session uses it.` } : null,
+    { key: 'project', label: 'Project', n: c.project, tip: 'Shared by every session in this project' },
+  ].filter(Boolean);
+  return h(
+    'div.mem-tabs',
+    { role: 'tablist' },
+    tabs.map((t) =>
+      h(
+        'button.mem-tab',
+        {
+          class: d.scope === t.key ? 'on' : '',
+          role: 'tab',
+          'aria-selected': String(d.scope === t.key),
+          title: t.tip,
+          onclick: () => {
+            d.scope = t.key;
+            d.query = '';
+            loadNotes();
+          },
+        },
+        t.label,
+        t.n ? h('span.mem-n', {}, String(t.n)) : null,
+      ),
+    ),
+  );
+}
+
+function scopeAbout(d) {
+  if (d.scope === 'project') return 'Shared by every session in this project.';
+  return `Only this session's, whichever agent works in it: Claude, ChatGPT, Gemini or another.`;
+}
+
+const shortPath = (p) => {
+  const parts = String(p || '').split(/[\\/]/).filter(Boolean);
+  return parts.length > 4 ? `${parts[0]}\\…\\${parts.slice(-3).join('\\')}` : String(p || '');
+};
+
+// Where this memory is kept, and what can be done with it.
+function memStorage(d, p, st) {
+  const folder = h('small.mono', { title: d.folder || S.memoryRoot }, shortPath(d.folder || S.memoryRoot));
+  if (!d.folder || d.folderFor !== `${d.dir}|${d.scope}`) {
+    d.folderFor = `${d.dir}|${d.scope}`;
+    deck.memFolder({ dir: d.dir, scope: d.scope }).then((f) => {
+      if (d.folderFor !== `${d.dir}|${d.scope}`) return;
+      d.folder = f;
+      folder.textContent = shortPath(f);
+      folder.title = f;
+    });
+  }
+  const what = d.scope === 'project' ? projectTitle(p || { name: 'project' }) : memberLabel(d.member);
+  return h(
+    'div.mem-store',
+    {},
+    h('div.mem-store-label', {}, h('span', {}, 'Storage'), h('span', {}, `${st.notes} note${st.notes === 1 ? '' : 's'} · ~${st.tokens} tokens`)),
+    h(
+      'div.mem-store-row',
+      {},
+      h('span.mem-store-ic', {}, icon('folder')),
+      h('div.grow', {}, h('b', {}, 'On this PC'), folder),
+      h('button.btn.small', { title: 'Open this folder', onclick: () => deck.memOpen({ dir: d.dir, scope: d.scope }) }, 'Open'),
+    ),
+    cloudRow(d, p),
+    cloudBringBanner(d, p),
+    h(
+      'div.mem-store-actions',
+      {},
+      h(
+        'button.btn.small',
+        {
+          onclick: (e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            const go = async (scope, name) => {
+              const res = await deck.memExport({ dir: d.dir, scope, name });
+              if (res.ok) toast(`Exported to ${res.file}`);
+              else if (!res.canceled) toast(res.text, true);
+            };
+            menu(r.left, r.top - 8, [
+              { heading: 'Export as a zip' },
+              d.member ? { label: `This session: ${memberLabel(d.member)}`, icon: 'person', run: () => go(d.member, memberLabel(d.member)) } : null,
+              p ? { label: `This project: ${projectTitle(p)}`, icon: 'folder', run: () => go('project', projectTitle(p)) } : null,
+              { label: 'All memory', icon: 'memory', run: () => go('all', 'all') },
+            ]);
+          },
+        },
+        icon('export'),
+        'Export',
+      ),
+      p && !p.server ? h('button.btn.small', { onclick: () => openImport(p) }, icon('import'), 'Import') : null,
+      h('span.grow'),
+      h('span.mem-scope-note', {}, what),
+    ),
+  );
+}

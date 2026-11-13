@@ -1,10 +1,14 @@
 // Team memory. Every project has shared notes; every session (a team member)
 // has its own knowledge base. Notes are plain markdown files, so they can be
-// read, edited and versioned outside the app:
+// read, edited and versioned outside the app. Where they live is in
+// memory-layout.js:
 //
-//   <root>/<project>/project/<note>.md
-//   <root>/<project>/members/<sessionId>/<note>.md
+//   <root>/company/<note>.md
+//   <root>/projects/<project>/shared/<note>.md
+//   <root>/projects/<project>/sessions/<session>--<id>/<note>.md
 //
+// Memory belongs to the session, not to the agent working in it, so every
+// agent a session uses reads and writes the same notes.
 // The root is a folder the user picks. It holds nothing but these files, so
 // it can be copied, moved or put on a USB stick and pointed at again.
 // Claude Code's own per-project memory files are read alongside (never
@@ -18,6 +22,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const { readLive, encodePath, UUID_RE, CLAUDE_DIR } = require('./scanner');
+const layout = require('./memory-layout');
 
 let ROOT = null;
 let MCP_DIR = null;
@@ -27,7 +32,8 @@ const secret = crypto.randomBytes(18).toString('hex');
 const cache = new Map(); // project dir -> notes[]
 let profileOf = () => ({}); // sessionId -> { role, name } as set by the user in the app
 
-const COMPANY = '_company'; // the company folder: knowledge base, documents, policies
+layout.attach(() => ROOT);
+const INDEX = 'loop.md'; // the list of a folder's notes, kept by Loop and read first
 const safeDir = (dir) => /^[A-Za-z0-9_-]+$/.test(dir);
 const estimateTokens = (text) => Math.ceil((text || '').length / 3.7);
 
@@ -134,7 +140,7 @@ async function readNotesIn(folder, scope) {
   }
   const notes = [];
   for (const name of names) {
-    if (!name.endsWith('.md')) continue;
+    if (!name.endsWith('.md') || name === INDEX) continue;
     const file = path.join(folder, name);
     try {
       notes.push(parseNote(await fsp.readFile(file, 'utf8'), file, scope));
@@ -148,20 +154,21 @@ async function readNotesIn(folder, scope) {
 async function loadProject(dir) {
   if (!safeDir(dir)) throw new Error('Invalid project');
   if (cache.has(dir)) return cache.get(dir);
-  const base = path.join(ROOT, dir);
-  const notes = await readNotesIn(path.join(base, 'project'), 'project');
+  await layout.ready();
+  const shared = await layout.sharedDir(dir, { create: false });
+  const notes = shared ? await readNotesIn(shared, 'project') : [];
+  if (shared) await indexIfMissing(shared, notes, 'project');
   // The company's own shelf: one folder beside the projects, read from every
   // project, so a policy or a document is written once and found everywhere.
-  const company = await readNotesIn(path.join(ROOT, COMPANY), 'company');
+  const company = await readNotesIn(layout.companyDir(), 'company');
+  await indexIfMissing(layout.companyDir(), company, 'company');
   for (const n of company) n.id = 'co-' + n.id;
   notes.push(...company);
-  let members = [];
-  try {
-    members = (await fsp.readdir(path.join(base, 'members'), { withFileTypes: true })).filter((d) => d.isDirectory() && UUID_RE.test(d.name));
-  } catch {
-    // no member has saved anything yet
+  for (const m of await layout.sessionDirs(dir)) {
+    const mine = await readNotesIn(m.folder, m.id);
+    await indexIfMissing(m.folder, mine, m.id);
+    notes.push(...mine);
   }
-  for (const m of members) notes.push(...(await readNotesIn(path.join(base, 'members', m.name), m.name)));
   // Claude Code's own memory for this project: read-only here.
   const own = (await readNotesIn(path.join(CLAUDE_DIR, 'projects', dir, 'memory'), 'claude')).filter((n) => n.id !== 'MEMORY');
   for (const n of own) {
@@ -176,15 +183,27 @@ async function loadProject(dir) {
   return notes;
 }
 
+const headingOf = (scope) => (scope === 'company' ? 'Company memory' : scope === 'project' ? 'Project memory, shared by every session' : 'This session\'s memory');
+
+// Rewrites a folder's loop.md from the notes in it.
+async function reindex(folder, scope) {
+  await layout.writeIndex(folder, headingOf(scope), await readNotesIn(folder, scope));
+}
+
+async function indexIfMissing(folder, notes, scope) {
+  if (!notes.length || fs.existsSync(path.join(folder, INDEX))) return;
+  await layout.writeIndex(folder, headingOf(scope), notes).catch(() => {});
+}
+
 const statsOf = (notes) => ({ notes: notes.length, tokens: notes.reduce((n, x) => n + x.tokens, 0) });
 const publicNote = ({ file, ...n }) => n;
 const inScope = (notes, scope) => notes.filter((n) => n.scope === scope);
 
-const countsOf = (all) => ({
-  project: all.filter((n) => n.scope === 'project').length,
-  claude: all.filter((n) => n.scope === 'claude').length,
-  company: all.filter((n) => n.scope === 'company').length,
-});
+const countsOf = (all) => {
+  const byScope = {};
+  for (const n of all) byScope[n.scope] = (byScope[n.scope] || 0) + 1;
+  return { project: byScope.project || 0, claude: byScope.claude || 0, company: byScope.company || 0, byScope };
+};
 
 async function list(dir, scope) {
   const all = await loadProject(dir);
@@ -196,18 +215,19 @@ async function saveNote({ dir, scope, id, title, body, tags, author }) {
   if (scope !== 'project' && scope !== 'company' && !UUID_RE.test(scope || '')) throw new Error('Invalid scope');
   const notes = await loadProject(dir);
   const existing = id ? notes.find((n) => n.id === id && !n.readOnly) : null;
-  const folder =
-    scope === 'company' ? path.join(ROOT, COMPANY) : scope === 'project' ? path.join(ROOT, dir, 'project') : path.join(ROOT, dir, 'members', scope);
+  const folder = scope === 'company' ? layout.companyDir() : scope === 'project' ? await layout.sharedDir(dir) : await layout.sessionDir(dir, scope, { create: true });
   let file;
   if (existing) file = existing.file;
   else {
-    const slug =
+    let slug =
       (title || 'note')
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '')
         .slice(0, 48) || 'note';
-    file = path.join(folder, `${slug}-${crypto.randomBytes(3).toString('hex')}.md`);
+    if (slug === 'loop' || slug === 'readme') slug += '-note'; // loop.md is the folder's index
+    file = path.join(folder, `${slug}.md`);
+    for (let n = 2; fs.existsSync(file); n++) file = path.join(folder, `${slug}-${n}.md`);
   }
   const note = {
     title: (title || 'Untitled note').trim().slice(0, 160),
@@ -221,6 +241,7 @@ async function saveNote({ dir, scope, id, title, body, tags, author }) {
   };
   await fsp.mkdir(path.dirname(file), { recursive: true });
   await fsp.writeFile(file, serialize(note));
+  await reindex(path.dirname(file), scope);
   cache.delete(dir);
   return path.basename(file, '.md');
 }
@@ -229,6 +250,7 @@ async function removeNote({ dir, id }) {
   const note = (await loadProject(dir)).find((n) => n.id === id);
   if (!note || note.readOnly) return false;
   await fsp.rm(note.file, { force: true });
+  await reindex(path.dirname(note.file), note.scope);
   cache.delete(dir);
   return true;
 }
@@ -304,12 +326,18 @@ function boardRights(team, me) {
 }
 
 const isMine = (task, me, myName) => (task.assigneeId ? task.assigneeId === me : Boolean(task.assignee) && task.assignee.toLowerCase() === String(myName).toLowerCase());
-const boardFile = (dir) => path.join(ROOT, dir, 'board.json');
+const boardFile = async (dir, create) => {
+  await layout.ready();
+  const proj = await layout.projectDir(dir, { create });
+  return proj && path.join(proj, 'board.json');
+};
 
 async function boardLoad(dir) {
   if (!safeDir(dir)) throw new Error('Invalid project');
   try {
-    const b = JSON.parse(await fsp.readFile(boardFile(dir), 'utf8'));
+    const file = await boardFile(dir, false);
+    if (!file) return { seq: 0, tasks: [] };
+    const b = JSON.parse(await fsp.readFile(file, 'utf8'));
     return { seq: b.seq || 0, tasks: Array.isArray(b.tasks) ? b.tasks : [] };
   } catch {
     return { seq: 0, tasks: [] };
@@ -317,10 +345,11 @@ async function boardLoad(dir) {
 }
 
 async function boardSave(dir, board) {
-  await fsp.mkdir(path.dirname(boardFile(dir)), { recursive: true });
-  const tmp = boardFile(dir) + '.tmp';
+  const file = await boardFile(dir, true);
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
   await fsp.writeFile(tmp, JSON.stringify(board, null, 2));
-  await fsp.rename(tmp, boardFile(dir));
+  await fsp.rename(tmp, file);
   onBoard(dir);
 }
 
@@ -1141,6 +1170,29 @@ function startServer() {
   });
 }
 
+// The memory server's address for one session, for agents that take it directly.
+function urlFor(dir, sessionId) {
+  if (!port || !safeDir(dir) || !UUID_RE.test(sessionId || '')) return null;
+  return `http://127.0.0.1:${port}/mcp/${secret}/${dir}/${sessionId}`;
+}
+
+// When Loop owns memory: what a session is told at its start, whatever agent it
+// is. It does what an agent's own memory does (an index read at the start, notes
+// saved as it learns), but the notes are Loop's, so any agent can pick them up.
+function ownerBrief(dir, sessionId) {
+  const notes = (cache.get(dir) || []).filter((n) => n.scope === 'project' || n.scope === 'company' || (sessionId && n.scope === sessionId));
+  const index = notes
+    .slice(0, 40)
+    .map((n) => `- ${n.title}${n.scope === sessionId ? ' (yours)' : ''}`)
+    .join('\n');
+  return (
+    'Your memory is kept by Loop, not by you, and it belongs to this session: whichever agent works in this session reads and writes the same notes. Never write memory files of your own (no MEMORY.md, no notes folder). ' +
+    'Before unfamiliar work, call memory_search with a few keywords. When you learn something that will still matter later (a decision and its reason, where something lives, a fix, a preference of the user), save it with memory_save, one topic per note, and update an existing note rather than adding a near-duplicate. ' +
+    'Never save passwords, keys or tokens. ' +
+    (index ? 'Notes this project already has, by title: ' + index.replace(/\n/g, '; ') : 'This project has no notes yet.')
+  );
+}
+
 // Writes the --mcp-config file for one session and returns its path.
 function configFor(dir, sessionId) {
   if (!port || !safeDir(dir) || !UUID_RE.test(sessionId || '')) return null;
@@ -1157,10 +1209,13 @@ const MARKER = 'session-deck-memory.json';
 const ABOUT = [
   '# Loop memory',
   '',
-  'Plain markdown notes written by you and by your Claude Code sessions.',
+  'Plain markdown notes written by you and by the agents in your Loop sessions.',
   '',
-  '- `<project>/project/` is shared by every session in that project',
-  "- `<project>/members/<session id>/` is one session's own knowledge base",
+  '- `company/` is shared by every project',
+  '- `projects/<project>/shared/` is shared by every session in that project',
+  "- `projects/<project>/sessions/<session>/` is one session's own memory, whichever agent works in it",
+  '',
+  'Each folder has a `loop.md` that lists its notes. Loop keeps it.',
   '',
   'This folder is self-contained. Move or copy it anywhere, then choose it',
   'again in Loop under Settings > Memory folder.',
@@ -1170,9 +1225,8 @@ const ABOUT = [
 async function stamp(dir) {
   await fsp.mkdir(dir, { recursive: true });
   const marker = path.join(dir, MARKER);
-  if (!fs.existsSync(marker)) await fsp.writeFile(marker, JSON.stringify({ app: 'session-deck', format: 1 }, null, 2));
-  const about = path.join(dir, 'README.md');
-  if (!fs.existsSync(about)) await fsp.writeFile(about, ABOUT);
+  if (!fs.existsSync(marker)) await fsp.writeFile(marker, JSON.stringify({ app: 'session-deck', format: 2 }, null, 2));
+  await fsp.writeFile(path.join(dir, 'README.md'), ABOUT);
 }
 
 // Point memory at another folder. A folder that already holds Loop
@@ -1223,10 +1277,43 @@ async function init(userData, chosen) {
     ROOT = fallback;
     await stamp(ROOT);
   }
+  const moved = await layout.ready();
+  if (moved && moved.error) warning = `Memory could not be moved into the new layout: ${moved.error}. Nothing was lost; a copy is in the memory folder.`;
   await startServer();
   return warning;
 }
 module.exports = {
+  urlFor,
+  ownerBrief,
+  // Where a project's memory is, made if needed; and naming projects and sessions.
+  projectFolder: async (dir) => {
+    await layout.ready();
+    return (await layout.projectDir(dir, { create: false })) || path.join(ROOT, 'projects');
+  },
+  projectFolderSync: (dir) => layout.projectDirSync(dir),
+  // The folder one scope's notes are in: company, project or a session id.
+  scopeFolder: async (dir, scope) => {
+    await layout.ready();
+    if (scope === 'company') return layout.companyDir();
+    if (scope === 'all') return ROOT;
+    if (scope === 'project') return (await layout.sharedDir(dir, { create: false })) || path.join(ROOT, 'projects');
+    return (await layout.sessionDir(dir, scope)) || (await layout.projectDir(dir, { create: false })) || path.join(ROOT, 'projects');
+  },
+  knownProjects: () => layout.knownProjects(),
+  setProjectNamer: (fn) => layout.setProjectNamer(fn),
+  setSessionNamer: (fn) => layout.setSessionNamer(fn),
+  setRemoteLookup: (fn) => layout.setRemoteLookup(fn),
+  // Notes arrived from outside (Loop Cloud): read afresh and rewrite the indexes.
+  rebuildIndexes: async (dir) => {
+    cache.delete(dir);
+    await layout.ready();
+    const shared = await layout.sharedDir(dir, { create: false });
+    if (shared && fs.existsSync(shared)) await reindex(shared, 'project').catch(() => {});
+    for (const s of await layout.sessionDirs(dir)) await reindex(s.folder, s.id).catch(() => {});
+    if (fs.existsSync(layout.companyDir())) await reindex(layout.companyDir(), 'company').catch(() => {});
+    cache.delete(dir);
+  },
+  listAll: (dir) => loadProject(dir),
   setProfileLookup: (fn) => (profileOf = fn),
   setTeamLookup: (fn) => (teamOf = fn),
   setCompanyLookup: (fn) => (companyOf = fn),
@@ -1250,6 +1337,11 @@ module.exports = {
   useRoot: (dir) => {
     ROOT = dir;
     cache.clear();
+  },
+  // Files changed under it from elsewhere (Loop Cloud): read everything again.
+  forget: () => {
+    cache.clear();
+    layout.reload();
   },
   startBrief,
   HOUSE_RULES,

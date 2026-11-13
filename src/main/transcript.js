@@ -281,8 +281,11 @@ function readUpload(p) {
   }
 }
 
+const FILE_RE = /(?:[A-Za-z]:)?[^\s"']*[\\/](?:phone-uploads|\.loop-uploads)[\\/]phone-[\w-]+--([^\s"'\\/]+)/gi;
 function uploadsIn(item) {
   if (!item || item.k !== 'user' || !item.text) return item;
+  const files = [...item.text.matchAll(FILE_RE)].map((m) => ({ name: m[1], file: m[0] }));
+  if (files.length) item = { ...item, files, text: item.text.replace(FILE_RE, '').replace(/\s{2,}/g, ' ').trim() };
   const found = item.text.match(UPLOAD_RE);
   if (!found) return item;
   const images = item.images ? [...item.images] : [];
@@ -671,4 +674,4 @@ module.exports = {
   tokensSince,
   goalTokens,
   usageLimits,
-  setUploadDir, follow, unfollow, earlier, fetchKept, slim, parse, describe, headline, userText, readLocal, _test: { localFile } };
+  setUploadDir, follow, unfollow, earlier, fetchKept, slim, parse, describe, headline, userText, readLocal, localFile, _test: { localFile } };

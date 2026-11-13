@@ -23,6 +23,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          # The version the phone app is built with here. A newer one deprecates
+          # package:flutter/material.dart, which fails analyze on every file.
+          flutter-version: 3.35.3
           cache: true
       - run: flutter pub get
         working-directory: app
@@ -42,6 +45,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          # The version the phone app is built with here. A newer one deprecates
+          # package:flutter/material.dart, which fails analyze on every file.
+          flutter-version: 3.35.3
           cache: true
       - run: flutter pub get
         working-directory: app

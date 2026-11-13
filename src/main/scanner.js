@@ -113,7 +113,7 @@ async function readSessionMeta(file, stat) {
   const hit = metaCache.get(file);
   if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit.meta;
 
-  const meta = { customTitle: null, agentName: null, aiTitle: null, lastPrompt: null, firstPrompt: null, cwd: null };
+  const meta = { customTitle: null, agentName: null, aiTitle: null, lastPrompt: null, firstPrompt: null, cwd: null, model: null, entrypoint: null };
   const tailLen = Math.min(stat.size, TAIL_BYTES);
   const tail = await readChunk(file, stat.size - tailLen, tailLen);
   const lines = tail.split('\n');
@@ -132,7 +132,31 @@ async function readSessionMeta(file, stat) {
       }
     }
     if (!meta.cwd && line.includes('"cwd":"')) meta.cwd = jsonField(line, 'cwd');
-    if (meta.customTitle && meta.aiTitle && meta.lastPrompt && meta.cwd) break;
+    // Who wrote to it last: a terminal (cli), a program (sdk-cli) or the Claude app (claude-desktop).
+    if (!meta.entrypoint) {
+      const ep = /"entrypoint":"([a-z-]{1,40})"/.exec(line);
+      if (ep) meta.entrypoint = ep[1];
+    }
+    // The model of the newest real reply ("<synthetic>" marks Claude Code's own notices).
+    if (!meta.model && line.includes('"type":"assistant"')) {
+      const m = /"role":"assistant","model":"([^"]{1,100})"/.exec(line) || /"message":\{[^{}]*?"model":"([^"]{1,100})"/.exec(line);
+      if (m && m[1] !== '<synthetic>') meta.model = m[1];
+    }
+    if (meta.customTitle && meta.aiTitle && meta.lastPrompt && meta.cwd && meta.model && meta.entrypoint) break;
+  }
+
+  // A long session can end in bookkeeping lines with no reply among them: look
+  // further back for the newest reply, a megabyte at a time, up to four.
+  for (let end = stat.size - tailLen, read = 0; !meta.model && end > 0 && read < 4; read++) {
+    const len = Math.min(end, 1024 * 1024);
+    const chunk = await readChunk(file, end - len, len + 512); // a little overlap, so no reply is cut in two
+    let last = null;
+    for (const m of chunk.matchAll(/"message":\{"model":"([^"]{1,100})"[^{}]{0,300}?"role":"assistant"|"role":"assistant","model":"([^"]{1,100})"/g)) {
+      const model = m[1] || m[2];
+      if (model !== '<synthetic>') last = model;
+    }
+    meta.model = last;
+    end -= len;
   }
 
   if (!meta.customTitle && !meta.agentName && !meta.aiTitle && !meta.lastPrompt) {
@@ -186,7 +210,11 @@ async function scanProject(dirName) {
         id,
         title: title || `Session from ${started}`,
         named: Boolean(meta.customTitle || meta.agentName),
+        titled: Boolean(meta.customTitle || meta.agentName || meta.aiTitle),
+        // The Claude desktop app has it now (/desktop moves a session there): it is that app's, not Loop's.
+        inApp: meta.entrypoint === 'claude-desktop',
         lastPrompt: meta.lastPrompt || meta.firstPrompt || '',
+        model: meta.model || '',
         mtime: stat.mtimeMs,
         size: stat.size,
         empty: !title && stat.size < 40000, // opened and closed without real work
@@ -355,4 +383,4 @@ async function peek(dirName, sessionId, opts = {}) {
   return turns.reverse();
 }
 
-module.exports = { scanProjects, readLive, isClaudePid, peek, encodePath, rootOf, UUID_RE, CLAUDE_DIR };
+module.exports = { resolveProjectPath, scanProjects, readLive, isClaudePid, peek, encodePath, rootOf, UUID_RE, CLAUDE_DIR };

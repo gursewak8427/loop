@@ -38,7 +38,8 @@ function serverLine(id) {
 
 // Projects on this PC first, then each server's.
 function mergeProjects() {
-  S.projects = [...S.local, ...[...S.srv.values()].flatMap((st) => (serverById(st.id) ? st.projects || [] : []))];
+  const far = S.switches && S.switches.servers ? [...S.srv.values()].flatMap((st) => (serverById(st.id) ? st.projects || [] : [])) : [];
+  S.projects = [...S.local, ...far];
   syncTeamNames();
 }
 
@@ -73,6 +74,7 @@ function wireServers() {
 
 // The rail gets one entry per server, under the workspaces.
 function railServers(item, liveIn) {
+  if (!S.switches || !S.switches.servers) return [];
   return (S.config.servers || []).map((s) => {
     const st = S.srv.get(s.id);
     const el = item(
@@ -227,7 +229,7 @@ async function serverReady(s) {
 function newSessionDialog(first) {
   return new Promise((resolve) => {
     const ws = wsById(S.config.activeWorkspace);
-    const servers = S.config.servers || [];
+    const servers = S.switches && S.switches.servers ? S.config.servers || [] : [];
     const inView = (p) => !isHiddenProject(p) && (!ws || wsOf(p) === ws.id);
     const leaf = (p) => p.split(/[\\/]/).filter(Boolean).pop() || p;
     const bad = (p) => /['"%!\r\n]/.test(p);
@@ -482,6 +484,7 @@ function newSessionDialog(first) {
 async function startSession(first) {
   closeOverlay();
   serversPaint = null;
+  if (first && !(S.switches && S.switches.servers)) first = null;
   if (first && !(await serverReady(first))) return;
   const v = await newSessionDialog(first || null);
   if (!v) return;
