@@ -1047,7 +1047,7 @@ function registerIpc() {
   // and the playing, so what crosses here is only words and sound.
   const voiceVoice = () => String((config.settings && config.settings.voiceName) || 'af_heart');
   voice.setListener((e) => sendAll('voice:event', e));
-  ipcMain.handle('voice:state', () => ({ ...voice.state(), voice: voiceVoice() }));
+  ipcMain.handle('voice:state', () => (switches.voice ? { ...voice.state(), voice: voiceVoice() } : { node: false, off: true }));
   ipcMain.handle('voice:warm', (_e, what) => voice.warm(String(what || 'say'), voiceVoice()).then(() => true));
   ipcMain.handle('voice:rules', () => voice.VOICE_RULES);
   // What is worth hearing of something a session wrote, and in what pieces.

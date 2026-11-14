@@ -284,8 +284,7 @@ async function openSettings(section) {
   paint();
   box.focus();
   // The voices are asked of the helper that speaks: the section appears once they are known.
-  deck
-    .voiceState()
+  (S.switches.voice ? deck.voiceState() : Promise.resolve(null))
     .then((v) => (v && v.node ? deck.voiceVoices() : []))
     .then((list) => {
       st.voices = list || [];
