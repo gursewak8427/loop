@@ -171,6 +171,8 @@ function teamRunner(config) {
     save: () => {},
     renderList: () => {},
     tabFor: () => null,
+    mailLog: (p, e) => (teamRunner.mail = e),
+    mailCommand: async () => 'mailbox',
     tellWhenIdle: (id, text) => told.push({ id, text }),
     // Work handed over goes in as a message to the session itself.
     sayTo: async (p, s, text) => (sent.push({ dir: p.dir, sessionId: s.id, text }), { ok: true }),

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { encodePath, rootOf, UUID_RE, peek } = require('../src/main/scanner');
+const { encodePath, rootOf, UUID_RE, peek, ensureProjectDir } = require('../src/main/scanner');
 
 test('encodePath matches how Claude Code names project folders', () => {
   assert.strictEqual(encodePath('D:\\Personal\\automation'), 'D--Personal-automation');
@@ -26,4 +26,17 @@ test('UUID_RE accepts session ids and rejects anything else', () => {
 test('peek refuses ids that could escape the projects folder', async () => {
   assert.deepStrictEqual(await peek('..', '00e3cdef-bb15-4768-861e-a547d98e1ba1'), []);
   assert.deepStrictEqual(await peek('D--x', 'not-a-uuid'), []);
+});
+
+// Under an account Loop added, Claude Code cannot make a new project's folder
+// itself (its mkdir through the linked "projects" fails), and saves nothing.
+test('the folder a new project keeps its conversations in is made before a session starts', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'loop-projects-'));
+  assert.strictEqual(ensureProjectDir('D:/shop/ecom', root), true);
+  assert.ok(fs.statSync(path.join(root, 'D--shop-ecom')).isDirectory());
+  assert.strictEqual(ensureProjectDir('D:/shop/ecom', root), true); // there already: nothing to do
+  assert.strictEqual(ensureProjectDir('', root), false);
 });

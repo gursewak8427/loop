@@ -30,7 +30,10 @@ let webUrl;
 let sawToken = '';
 let cloud;
 let cloudBase;
+const farDone = new Set(); // sign-ins the stand-in for Loop Cloud has already traded
 const cloudSaw = [];
+const farSignIns = [];
+const farGitAsks = [];
 test.before(async () => {
   web = http.createServer((req, res) => {
     let raw = '';
@@ -60,6 +63,25 @@ test.before(async () => {
       cloudSaw.push({ url: req.url, auth: req.headers.authorization || '' });
       if (req.headers.authorization !== 'Bearer machine-sign-in') return res.writeHead(401).end();
       const m = JSON.parse(raw);
+      // Signing in to a tool that lives in the cloud, started from a machine.
+      // git on this machine asking for a GitHub sign-in of the hour.
+      if (req.url === '/api/git/credential' || req.url === '/api/git/who') {
+        farGitAsks.push({ url: req.url, body: m });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(req.url.endsWith('/who') ? { name: 'Far Me', email: '3+far@users.noreply.github.com' } : { username: 'x-access-token', password: 'ghu_hour', expires: Date.now() + 3600e3, tool: m.tools[0] }));
+      }
+      if (/\/signin$|\/oauth\/finish$/.test(req.url)) {
+        farSignIns.push({ url: req.url, body: m });
+        if (req.url.endsWith('/finish')) {
+          if (farDone.has(m.state)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'This sign-in was already used, or is too old. Press Sign in again.' }));
+          }
+          farDone.add(m.state);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(req.url.endsWith('/signin') ? { ok: true, url: 'https://service.example/authorize?client_id=loop', state: 'far-state-1' } : { ok: true, name: 'Cloudy' }));
+      }
       if (m.id === undefined) return res.writeHead(202).end();
       const result =
         m.method === 'initialize'
@@ -113,8 +135,17 @@ test('two environments give two projects different tools', async () => {
 
   assert.deepStrictEqual(names(await rpc('proj-a', 'tools/list')), ['loop_find_tools', 'loop_run_tool', `${shoutKey}__shout`]);
   assert.deepStrictEqual(names(await rpc('proj-b', 'tools/list')), ['loop_find_tools', 'loop_run_tool', `${shoutKey}__shout`, `${sumsKey}__add`]);
-  assert.deepStrictEqual((await rpc('proj-c', 'tools/list')).tools, [], 'a project with no environment gets nothing');
-  assert.strictEqual(hub.entryFor('proj-c', SID), null);
+  // Nothing chosen for a project or for this PC: it gets all tools.
+  assert.strictEqual(hub.envOf('proj-c').name, 'All tools');
+  assert.deepStrictEqual(names(await rpc('proj-c', 'tools/list')), ['loop_find_tools', 'loop_run_tool', `${shoutKey}__shout`, `${sumsKey}__add`]);
+  assert.ok(hub.entryFor('proj-c', SID));
+  // A project can be given all tools by name, whatever this PC's own choice is.
+  hub.setDefaultEnv(personal);
+  assert.strictEqual(hub.envOf('proj-c').name, 'Personal');
+  assert.ok(hub.setProjectEnv('proj-c', '*'));
+  assert.strictEqual(hub.envOf('proj-c').name, 'All tools');
+  hub.setProjectEnv('proj-c', '');
+  hub.setDefaultEnv('');
   assert.match(hub.entryFor('proj-a', SID).server.url, /^http:\/\/127\.0\.0\.1:\d+\/hub\/[a-f0-9]+\/proj-a\//);
 });
 
@@ -173,7 +204,7 @@ test('what is set up on Loop Cloud is taken as it is; this PC keeps its own choi
   assert.strictEqual(hub.adopt(theirs, 'This machine'), true);
   assert.strictEqual(hub.adopt(theirs, 'This machine'), false, 'the same thing twice changes nothing');
   assert.strictEqual(hub.envOf('proj-b').name, 'Clients', 'projects keep their environment');
-  assert.strictEqual(hub.envOf('proj-a'), null, 'an environment the website removed is gone here too');
+  assert.strictEqual(hub.envOf('proj-a').name, 'All tools', 'a project whose environment the website removed goes back to all tools');
 
   const by = Object.fromEntries(hub.state().servers.map((x) => [x.key, x]));
   assert.strictEqual(by[shoutKey].ask, false, 'a program allowed before stays allowed');
@@ -283,6 +314,56 @@ test("a tool that runs in Loop Cloud is called there with this machine's sign-in
   assert.ok(!JSON.stringify(hub.state()).includes('machine-sign-in'), 'a window never sees the sign-in');
 });
 
+test("tools added on this PC go to every session here, beside its environment's, and never leave", async () => {
+  // A project that takes no Loop Cloud tools still gets this PC's own.
+  hub.setProjectEnv('proj-x', 'none');
+  assert.strictEqual(hub.entryFor('proj-x', SID), null, 'nothing yet');
+  const mine = hub.saveLocal({ name: 'Mine', kind: 'stdio', command: `"${process.execPath}" "${prog}"`, env: 'KEY=localkey' });
+  assert.ok(mine.ok);
+  const seen = hub.state().local.find((x) => x.key === mine.key);
+  assert.deepStrictEqual([seen.name, seen.on, seen.envNames], ['Mine', true, ['KEY']]);
+  assert.ok(!JSON.stringify(hub.state()).includes('localkey'), 'its key is not shown to a window');
+
+  const entry = hub.entryFor('proj-x', SID);
+  assert.ok(entry && entry.only === false, 'a session gets the loop entry, added to what its agent already has');
+  assert.deepStrictEqual(names(await rpc('proj-x', 'tools/list')), ['loop_find_tools', 'loop_run_tool', `${mine.key}__shout`]);
+  assert.strictEqual((await rpc('proj-x', 'tools/call', { name: `${mine.key}__shout`, arguments: { text: 'hi' } })).content[0].text, 'HI localkey', 'no "allow" step: it was typed in here');
+
+  // A project that has an environment gets both.
+  const both = names(await rpc('proj-b', 'tools/list'));
+  assert.ok(both.includes(`${mine.key}__shout`) && both.some((n) => n.startsWith(`${shoutKey}__`)));
+
+  // Switched off, it is gone from sessions and stays in the list; removed, it is gone.
+  hub.setLocalOn(mine.key, false);
+  assert.strictEqual(hub.entryFor('proj-x', SID), null);
+  assert.strictEqual(hub.state().local.find((x) => x.key === mine.key).on, false);
+  hub.setLocalOn(mine.key, true);
+  assert.ok(hub.entryFor('proj-x', SID));
+
+  // What Loop Cloud says never touches this PC's own tools.
+  const work = hub.state().envs[0];
+  const cloud = JSON.parse(fs.readFileSync(path.join(tmp, 'mcp-hub.json'), 'utf8'));
+  hub.adopt({ at: Date.now() + 9e6, servers: { ...cloud.servers, [mine.key]: { name: 'Same key, from the cloud', kind: 'http', url: 'https://x.example/mcp', headers: {} } }, envs: { [work.id]: { name: work.name, only: false, servers: work.servers } } }, 'This machine');
+  const kept = hub.state().local.find((x) => x.name === 'Mine');
+  assert.ok(kept && kept.key !== mine.key, 'it keeps working under a key of its own');
+  assert.strictEqual((await rpc('proj-x', 'tools/call', { name: `${kept.key}__shout`, arguments: { text: 'still' } })).content[0].text, 'STILL localkey');
+  hub.adopt({ at: Date.now() + 9e6 + 1, servers: cloud.servers, envs: { [work.id]: { name: work.name, only: false, servers: work.servers } } }, 'This machine');
+
+  assert.strictEqual(hub.removeLocal(kept.key), true);
+  assert.strictEqual(hub.entryFor('proj-x', SID), null);
+});
+
+test("an agent's own tools are brought into this PC's list in one step", () => {
+  const file = path.join(tmp, 'claude-local.json');
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: { phone: { type: 'http', url: 'http://127.0.0.1:7801/phone' }, notes: { command: 'npx', args: ['-y', 'notes-mcp'], env: { TOKEN: 't' } } } }));
+  assert.strictEqual(hub.importLocal(file).added, 2);
+  assert.strictEqual(hub.importLocal(file).added, 0, 'the same ones are not added twice');
+  const by = Object.fromEntries(hub.state().local.map((x) => [x.name, x]));
+  assert.strictEqual(by.phone.url, 'http://127.0.0.1:7801/phone');
+  assert.deepStrictEqual(by.notes.envNames, ['TOKEN']);
+  for (const x of hub.state().local) hub.removeLocal(x.key);
+});
+
 test("bringing in Claude Code's own tools", () => {
   const file = path.join(tmp, 'claude.json');
   fs.writeFileSync(
@@ -305,4 +386,163 @@ test("bringing in Claude Code's own tools", () => {
 test('command lines and key lists are read the way people type them', () => {
   assert.deepStrictEqual(hub.words('npx -y "@scope/pkg name" --flag'), ['npx', '-y', '@scope/pkg name', '--flag']);
   assert.deepStrictEqual(hub.pairs('A=1\nB: two words\n\nC', { C: 'kept' }), { A: '1', B: 'two words', C: 'kept' });
+});
+
+test('a web tool that asks for a browser sign-in: found, signed in to, renewed, and its token never shown', async () => {
+  const srv = await require('./fake-oauth-mcp').start();
+  try {
+    const made = hub.saveLocal({ name: 'Signed', kind: 'http', url: srv.url });
+    assert.ok(made.ok);
+    const mine = () => hub.state().local.find((x) => x.key === made.key);
+    const first = await hub.test(made.key);
+    assert.strictEqual(first.ok, false);
+    assert.match(first.error, /sign in/i);
+    assert.strictEqual(mine().auth, 'needed');
+
+    // Loop finds the sign-in page; the browser goes there and is sent back to this PC.
+    const go = await hub.signIn(made.key);
+    assert.ok(go.ok, go.error);
+    const page = await fetch(go.url, { redirect: 'manual' });
+    assert.strictEqual(page.status, 302);
+    const back = page.headers.get('location');
+    assert.match(back, /^http:\/\/127\.0\.0\.1:\d+\/oauth\/callback\?code=/);
+    const done = await fetch(back);
+    assert.strictEqual(done.status, 200);
+    assert.match(await done.text(), /You are signed in to Signed/);
+    assert.strictEqual((await fetch(back)).status, 400, 'the link works once');
+
+    const second = await hub.test(made.key);
+    assert.deepStrictEqual([second.ok, second.tools], [true, ['whoami']]);
+    assert.strictEqual(mine().auth, 'in');
+    assert.ok(!/tok-|ref-/.test(JSON.stringify(hub.state())), 'a window is never shown the token');
+    assert.strictEqual((await rpc('proj-x', 'tools/call', { name: `${made.key}__whoami`, arguments: {} })).content[0].text, 'signed in with tok-1');
+
+    // Its hour is up: Loop gets a fresh token by itself and the call still works.
+    srv.expire();
+    assert.strictEqual((await rpc('proj-x', 'tools/call', { name: `${made.key}__whoami`, arguments: {} })).content[0].text, 'signed in with tok-2');
+    assert.strictEqual(srv.state.renewed, 1);
+
+    // The sign-in is kept across an edit of its name, and dropped when its address changes.
+    hub.saveLocal({ key: made.key, name: 'Signed again', kind: 'http', url: srv.url });
+    assert.strictEqual(mine().auth, 'in');
+    hub.saveLocal({ key: made.key, name: 'Signed again', kind: 'http', url: 'http://127.0.0.1:9/mcp' });
+    assert.strictEqual(mine().auth, '');
+    hub.removeLocal(made.key);
+  } finally {
+    srv.close();
+  }
+});
+
+test('a tool in Loop Cloud is signed in to from this PC: the browser comes back here and the code goes to Loop Cloud', async () => {
+  const file = JSON.parse(fs.readFileSync(path.join(tmp, 'mcp-hub.json'), 'utf8'));
+  hub.adopt({ at: Date.now() + 240000, servers: { ...file.servers, cloudy: { name: 'Cloudy', kind: 'http', url: `${cloudBase}/api/gw/cloudy`, viaCloud: true, signIn: 'needed' } }, envs: file.envs }, 'This machine');
+  assert.strictEqual(hub.state().servers.find((x) => x.key === 'cloudy').signIn, 'needed');
+
+  const go = await hub.signIn('cloudy');
+  assert.deepStrictEqual(go, { ok: true, url: 'https://service.example/authorize?client_id=loop' });
+  const asked = farSignIns[0];
+  assert.strictEqual(asked.url, '/api/tools/servers/cloudy/signin');
+  assert.match(asked.body.redirect, /^http:\/\/127\.0\.0\.1:\d+\/oauth\/callback$/, 'this PC lends its own address to come back to');
+
+  // The service sends the browser back to this PC, which hands the code on and keeps nothing.
+  const back = `${asked.body.redirect}?code=the-code&state=far-state-1`;
+  const done = await fetch(back);
+  assert.strictEqual(done.status, 200);
+  assert.match(await done.text(), /You are signed in to Cloudy/);
+  assert.deepStrictEqual(farSignIns[1], { url: '/api/tools/oauth/finish', body: { state: 'far-state-1', code: 'the-code', error: '' } });
+  assert.strictEqual((await fetch(back)).status, 400, 'the link works once');
+  assert.ok(!fs.readFileSync(path.join(tmp, 'mcp-hub.json'), 'utf8').includes('the-code'), 'nothing of the sign-in is kept on this PC');
+
+  // A sign-in started on the Loop Cloud website, for a service that sends people back only to their own
+  // computer, comes back to this app too. It did not start it, so it only hands the code on.
+  const web = `${asked.body.redirect}?code=web-code&state=started-on-the-website`;
+  const handed = await fetch(web);
+  assert.strictEqual(handed.status, 200);
+  assert.match(await handed.text(), /You are signed in to Cloudy. It is ready on every machine. You can close this tab and go back to Loop Cloud./);
+  assert.deepStrictEqual(farSignIns.at(-1), { url: '/api/tools/oauth/finish', body: { state: 'started-on-the-website', code: 'web-code', error: '' } });
+  // What Loop Cloud turns down is said on the page, with what to do about it.
+  const again = await fetch(web);
+  assert.strictEqual(again.status, 400);
+  assert.match(await again.text(), /This sign-in was already used, or is too old. Press Sign in again.</);
+});
+
+test('git in a session signs in to GitHub through a connection kept in Loop Cloud, and through nothing else', async () => {
+  hub.gitTesting({ knowsName: true });
+  farGitAsks.length = 0;
+  try {
+    const file = JSON.parse(fs.readFileSync(path.join(tmp, 'mcp-hub.json'), 'utf8'));
+    const servers = {
+      ...file.servers,
+      // A GitHub connection signed in in Loop Cloud, as a machine is told of it.
+      'gh-far': { name: 'GitHub', kind: 'http', url: cloudBase + '/api/gw/gh-far', viaCloud: true, signIn: 'in', git: true },
+      // One kept in Loop Cloud with a pasted key, or not signed in yet: no git through it.
+      'gh-key': { name: 'GitHub key', kind: 'http', url: cloudBase + '/api/gw/gh-key', viaCloud: true },
+      // GitHub tools that hold a token on this machine. Their token is never given to git.
+      'gh-web': { name: 'github-here', kind: 'http', url: 'https://api.githubcopilot.com/mcp/', headers: { Authorization: 'Bearer ghp_onmachine' } },
+      'gh-prog': { name: 'github-prog', kind: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], env: { GITHUB_PERSONAL_ACCESS_TOKEN: 'ghp_program' } },
+    };
+    const envs = { ...file.envs, far: { name: 'Far', only: true, servers: ['gh-far', 'gh-web'] }, here: { name: 'Here', only: true, servers: ['gh-key', 'gh-web', 'gh-prog'] } };
+    hub.adopt({ at: Date.now() + 600000, servers, envs }, 'This machine');
+    hub.approve('gh-prog');
+    hub.setProjectEnv('proj-far', 'far');
+    hub.setProjectEnv('proj-here', 'here');
+
+    assert.deepStrictEqual(await hub.gitEnv('proj-here'), {}, 'a token on this machine, or a key in Loop Cloud, signs no git in');
+    hub.setProjectEnv('proj-none', 'none');
+    assert.deepStrictEqual(await hub.gitEnv('proj-none'), {}, 'a project with no GitHub connection is left as it is');
+    assert.deepStrictEqual(hub.state().servers.filter((x) => x.git).map((x) => x.key), ['gh-far']);
+
+    const env = await hub.gitEnv('proj-far');
+    assert.strictEqual(env.GIT_CONFIG_COUNT, '3');
+    assert.strictEqual(env.GIT_AUTHOR_NAME, undefined, 'git already knows who commits here');
+    assert.ok(!/ghp_|ghu_/.test(JSON.stringify(env)), 'the session is handed no token, only where to ask');
+
+    // git itself asks, as it does on a clone or a push. (Not spawnSync: the hub it asks lives in this same process.)
+    const fill = (with_, repoPath, host = 'github.com') =>
+      new Promise((resolve) => {
+        const c = require('child_process').spawn('git', ['credential', 'fill'], { env: { ...process.env, ...with_, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' } });
+        let out = '';
+        c.stdout.on('data', (d) => (out += d));
+        c.on('close', () => resolve((/^password=(.*)$/m.exec(out) || [])[1] || ''));
+        c.on('error', () => resolve(''));
+        c.stdin.end('protocol=https\nhost=' + host + '\npath=' + repoPath + '\n\n');
+      });
+    assert.strictEqual(await fill(env, 'acme/app.git'), 'ghu_hour');
+    assert.deepStrictEqual(farGitAsks[0], { url: '/api/git/credential', body: { host: 'github.com', repo: 'acme/app', tools: ['gh-far'] } });
+    assert.strictEqual(await fill(env, 'acme/app.git'), 'ghu_hour');
+    assert.strictEqual(farGitAsks.length, 1, 'a clone asks several times; Loop Cloud is asked once');
+    assert.strictEqual(await fill(env, 'me/other.git'), 'ghu_hour');
+    assert.strictEqual(farGitAsks.length, 2, 'another repo is asked about on its own');
+    const kept = fs.readFileSync(path.join(tmp, 'mcp-hub.json'), 'utf8');
+    assert.ok(!kept.includes('ghu_hour'), 'what was handed over is not written to this PC');
+    assert.ok(!JSON.stringify(hub.state()).includes('ghu_hour'), 'nor shown to a window');
+
+    // A machine where git was never told who commits is given the person behind the connection.
+    hub.gitTesting({ knowsName: false });
+    const fresh = await hub.gitEnv('proj-far');
+    assert.deepStrictEqual([fresh.GIT_AUTHOR_NAME, fresh.GIT_COMMITTER_EMAIL], ['Far Me', '3+far@users.noreply.github.com']);
+
+    // Only a session's own git, with the hub's secret, is answered.
+    const port = /127\.0\.0\.1:(\d+)\/git\//.exec(env.GIT_CONFIG_VALUE_1)[1];
+    const wrong = await fetch('http://127.0.0.1:' + port + '/git/' + 'a'.repeat(32) + '/proj-far', { method: 'POST', body: 'protocol=https\nhost=github.com\n' });
+    assert.strictEqual(wrong.status, 404);
+  } finally {
+    hub.gitTesting({ knowsName: true });
+  }
+});
+
+test('a tool on this PC can be kept to one project', async () => {
+  const one = hub.saveLocal({ name: 'Only here', kind: 'stdio', command: `"${process.execPath}" "${prog}"`, dir: 'proj-x' });
+  assert.strictEqual(hub.state().local.find((x) => x.key === one.key).dir, 'proj-x');
+  assert.ok(names(await rpc('proj-x', 'tools/list')).includes(`${one.key}__shout`));
+  assert.ok(!names(await rpc('proj-y', 'tools/list')).includes(`${one.key}__shout`), 'another project does not get it');
+  hub.saveLocal({ key: one.key, name: 'Only here', kind: 'stdio', command: `"${process.execPath}" "${prog}"`, dir: '' });
+  assert.ok(names(await rpc('proj-y', 'tools/list')).includes(`${one.key}__shout`), 'set back to every project');
+  hub.removeLocal(one.key);
+});
+
+test('the sign-in code is the same in the app and in Loop Cloud', () => {
+  const cloudCopy = path.join(__dirname, '..', 'cloud', 'oauth.js');
+  if (!fs.existsSync(cloudCopy)) return; // the public copy of Loop has no cloud folder
+  assert.strictEqual(fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'oauth.js'), 'utf8'), fs.readFileSync(cloudCopy, 'utf8'));
 });

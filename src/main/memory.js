@@ -313,6 +313,7 @@ let waDo = async () => 'WhatsApp is not set up in Loop.'; // whatsapp_listen, an
 let teamOf = () => null; // project dir -> { roles: [{ key, title, manages }], members: { sessionId: key } }
 let companyOf = () => ({}); // the company as the user set it in Loop: { rules, checkMins }
 let subOf = () => null; // sessionId -> { parent, task } when it is a sub-session
+let bossOf = () => ''; // project dir -> the session the user made boss of it, or ''
 
 // Who may do what on a project's board. With a project manager on the team,
 // the manager alone adds, assigns and edits tickets; everyone else comments
@@ -593,6 +594,21 @@ const TOOLS = [
       },
       required: ['action'],
     },
+  },
+  {
+    name: 'mailbox_list',
+    // Loaded from the first moment: a session woken by a message must not spend a call finding the tool to answer with.
+    _meta: { 'anthropic/alwaysLoad': true },
+    description:
+      'The Loop mailbox of this project: every session in it, in the team or not, with its name, the agent it runs on, whether it is running, and which one is the boss. Call it before deciding who should do something.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'mailbox_send',
+    _meta: { 'anthropic/alwaysLoad': true },
+    description:
+      'Send a message to another session of this project through the Loop mailbox: "to" is its name from mailbox_list, "text" what you need or your answer. It arrives in that session as a message and wakes it if it is closed, so this is how work is handed over and how it is answered. Keep it short. Never send an acknowledgement or thanks.',
+    inputSchema: { type: 'object', properties: { to: { type: 'string' }, text: { type: 'string' } }, required: ['to', 'text'] },
   },
   {
     name: 'subsession_start',
@@ -893,13 +909,25 @@ async function teamInfo(dir, me, want) {
     .join('\n');
 }
 
+// What the session the user made boss of a project is told at its start.
+function bossBrief(dir, me) {
+  if (!me || bossOf(dir) !== me) return '';
+  return (
+    'The user made you the boss of this project: you decide who does what here. When work comes in, do small jobs yourself. ' +
+    'For the rest call mailbox_list, which shows every session of this project (in the team or not), choose who does it, and hand it over with mailbox_send, which wakes a session that is closed. ' +
+    'Hand over a short ticket: the goal, the files or links, and how to check it is done. Take its answer as the report: do not check or redo its work yourself. Report to the user once, when the work is done or stuck.'
+  );
+}
+
 // Goes into a member's system prompt when Loop starts or resumes it. It holds no
 // copy of the team, only which tool has it and that the tool outranks what the
 // conversation remembers.
 function startBrief(dir, me) {
+  const boss = bossBrief(dir, me);
   const team = teamOf(dir);
-  if (!team || !team.members[me]) return '';
+  if (!team || !team.members[me]) return boss;
   return (
+    (boss ? boss + ' ' : '') +
     'You are a member of the team the user set up for this project in Loop. The team is kept in Loop, not in this conversation, and the user changes it there, ' +
     'so anything about the team, its roles or who does what that appears earlier in this conversation or in your notes may be out of date. ' +
     'Whenever you need to know who is on the team, who holds which role, what a role does or who should do something, call the team_info tool first and answer only from its result, role by role. Its result always wins over what you remember: do not ask the user which is current. ' +
@@ -926,6 +954,9 @@ async function callTool(name, args, ctx) {
     if (args.worktree != null) sub.worktree = Boolean(args.worktree);
     return teamDo({ dir, me, action: name, sub });
   }
+  // The mailbox is the window's to run: it knows which sessions are open and can wake one.
+  if (name === 'mailbox_list') return teamDo({ dir, me, action: 'mail_list' });
+  if (name === 'mailbox_send') return teamDo({ dir, me, action: 'mail_send', session: args.to == null ? '' : String(args.to).trim().slice(0, 300), text: args.text == null ? '' : String(args.text).slice(0, 6000) });
   if (name === 'team_manage') {
     const pick = (k) => (args[k] == null ? '' : String(args[k]).trim().slice(0, 300));
     return teamDo({ dir, me, action: pick('action'), session: pick('session'), role: pick('role'), name: pick('name'), duty: pick('duty'), scope: pick('scope'), text: args.text == null ? '' : String(args.text).slice(0, 6000) });
@@ -1129,12 +1160,45 @@ async function handleRpc(msg, ctx) {
   }
 }
 
+// The mailbox for a session whose agent takes no tools from Loop: the same two
+// requests, asked by the loop-mail command and answered in plain words.
+function mailHttp(req, res, m) {
+  const say = (code, text) => {
+    res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(text);
+  };
+  if (m[1] !== secret || !UUID_RE.test(m[3])) return say(404, 'Not found.');
+  if (req.method !== 'POST') return say(405, 'Use the loop-mail command.');
+  let raw = '';
+  req.on('data', (c) => {
+    raw += c;
+    if (raw.length > 64e3) req.destroy();
+  });
+  req.on('end', async () => {
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      return say(400, 'That request could not be read.');
+    }
+    const q = { dir: m[2], me: m[3], via: 'shell' };
+    try {
+      if (m[4] === 'list') return say(200, await teamDo({ ...q, action: 'mail_list' }));
+      return say(200, await teamDo({ ...q, action: 'mail_send', session: String(body.to == null ? '' : body.to).trim().slice(0, 300), text: String(body.text == null ? '' : body.text).slice(0, 6000) }));
+    } catch (e) {
+      say(500, `The mailbox could not do that: ${e.message}`);
+    }
+  });
+}
+
 function startServer() {
   server = http.createServer((req, res) => {
     const send = (code, body) => {
       res.writeHead(code, body ? { 'Content-Type': 'application/json' } : {});
       res.end(body ? JSON.stringify(body) : undefined);
     };
+    const mail = /^\/mail\/([a-f0-9]+)\/([A-Za-z0-9_-]+)\/([0-9a-f-]{36})\/(list|send)\/?$/.exec(req.url || '');
+    if (mail) return mailHttp(req, res, mail);
     const m = /^\/mcp\/([a-f0-9]+)\/([A-Za-z0-9_-]+)\/([0-9a-f-]{36})\/?$/.exec(req.url || '');
     if (!m || m[1] !== secret || !UUID_RE.test(m[3])) return send(404);
     if (req.method === 'DELETE') return send(200);
@@ -1174,6 +1238,12 @@ function startServer() {
 function urlFor(dir, sessionId) {
   if (!port || !safeDir(dir) || !UUID_RE.test(sessionId || '')) return null;
   return `http://127.0.0.1:${port}/mcp/${secret}/${dir}/${sessionId}`;
+}
+
+// The mailbox's address for one session, for the loop-mail command.
+function mailUrlFor(dir, sessionId) {
+  if (!port || !safeDir(dir) || !UUID_RE.test(sessionId || '')) return null;
+  return `http://127.0.0.1:${port}/mail/${secret}/${dir}/${sessionId}`;
 }
 
 // When Loop owns memory: what a session is told at its start, whatever agent it
@@ -1284,6 +1354,7 @@ async function init(userData, chosen) {
 }
 module.exports = {
   urlFor,
+  mailUrlFor,
   ownerBrief,
   // Where a project's memory is, made if needed; and naming projects and sessions.
   projectFolder: async (dir) => {
@@ -1318,6 +1389,7 @@ module.exports = {
   setTeamLookup: (fn) => (teamOf = fn),
   setCompanyLookup: (fn) => (companyOf = fn),
   setSubLookup: (fn) => (subOf = fn),
+  setBossLookup: (fn) => (bossOf = fn),
   setTeamDo: (fn) => (teamDo = fn),
   setWhatsApp: (fn) => (waDo = fn),
   onBoard: (fn) => (onBoard = fn),
@@ -1344,10 +1416,11 @@ module.exports = {
     layout.reload();
   },
   startBrief,
+  bossBrief,
   HOUSE_RULES,
   housePlain,
   checkMins,
   setRoot,
   root: () => ROOT,
-  _test: { rank, chunk, terms, estimateTokens, parseNote, boardRights, isMine, callTool, rulesFor, companyRules, memberRules, setRootForTest: (dir) => (ROOT = dir) },
+  _test: { rank, chunk, terms, estimateTokens, parseNote, boardRights, isMine, callTool, rulesFor, companyRules, memberRules, setRootForTest: (dir) => (ROOT = dir), startServerForTest: () => startServer() },
 };

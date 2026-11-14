@@ -168,7 +168,7 @@ function handle(c, raw) {
     }
     c.desk = true;
     clients.delete(c.id);
-    hooks.deskAttach(c.ws);
+    hooks.deskAttach(c.ws, hooks.visitorName ? hooks.visitorName(String(m.key || '').trim()) : '');
     return;
   }
   if (c.desk) return;

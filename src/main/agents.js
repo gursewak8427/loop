@@ -103,6 +103,19 @@ function command(o) {
   return [exe, a.model(m), ...rest].join(' ');
 }
 
+// Gives a session on another agent Loop's tools: the same single entry, "loop",
+// a Claude Code session gets. Each agent takes a tool server its own way; where
+// Loop knows that way the command is extended, and otherwise it is left as it is.
+// The address is Loop's own, on this PC, and holds nothing a shell would act on.
+function withTools(command, agent, url) {
+  if (!/^http:\/\/127\.0\.0\.1:\d{1,5}\/hub\/[a-f0-9]+\/[A-Za-z0-9_-]+\/[0-9a-f-]{36}$/.test(String(url || ''))) return command;
+  if (agent === 'codex') return String(command).replace(/^codex\b/, `codex -c mcp_servers.loop.url=${url}`);
+  return command;
+}
+
+// The agents that can be given Loop's tools today.
+const takesTools = (agent) => agent === 'codex';
+
 // ---- several logins for one agent ----
 
 const ACCOUNT_RE = /^[a-z0-9]{1,24}$/;
@@ -223,7 +236,7 @@ async function loginOf(id, account, home) {
 // of added accounts, [{ id, agent, name }]; the main login is always first.
 async function statusOf(id, extra = [], home = HOME) {
   const a = get(id);
-  const base = { id, name: a.name, tool: a.tool, plan: a.plan, canInstall: Boolean(a.install), multi: Boolean(a.homeEnv) };
+  const base = { id, name: a.name, tool: a.tool, plan: a.plan, canInstall: Boolean(a.install), multi: Boolean(a.homeEnv), tools: takesTools(id) };
   if (!(await installed(a.exe))) return { ...base, installed: false, signedIn: false, accounts: [] };
   const mine = a.homeEnv ? extra.filter((x) => x && x.agent === id && ACCOUNT_RE.test(String(x.id))) : [];
   const accounts = await Promise.all(
@@ -413,4 +426,4 @@ function modelOf(id, native, home = HOME) {
   return model;
 }
 
-module.exports = { AGENTS, get, command, statusOf, statusAll, findNative, turns, modelOf, codexLogin, init, envFor, homeOf, removeAccount, multi };
+module.exports = { withTools, takesTools, AGENTS, get, command, statusOf, statusAll, findNative, turns, modelOf, codexLogin, init, envFor, homeOf, removeAccount, multi };

@@ -24,6 +24,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const oauth = require('./oauth');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KEY_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
@@ -33,15 +34,20 @@ const CALL = 10 * 60e3; // the longest one tool call may take
 const IDLE = 15 * 60e3; // a program nobody has used for this long is closed
 
 let FILE = '';
-let doc = { v: 1, at: 0, servers: {}, envs: {}, projectEnv: {}, defaultEnv: '', approved: [], machine: os.hostname() };
+let doc = { v: 1, at: 0, servers: {}, envs: {}, projectEnv: {}, defaultEnv: '', approved: [], machine: os.hostname(), local: {}, localOff: [] };
 let server = null;
+const spent = new Set(); // sign-ins this app started that have come back: their links work once
+let backServer = null; // the fixed address a website-started sign-in comes back to
 let port = 0;
 const secret = crypto.randomBytes(16).toString('hex');
 let onChange = () => {};
 let cloudHeaders = () => ({}); // this machine's Loop Cloud sign-in, as request headers
 let cloudBase = ''; // where Loop Cloud is; the only place that sign-in is sent
+let cloudRefresh = async () => {}; // reads the tools from Loop Cloud again
 const links = new Map(); // server key -> a live connection
 const lastErr = new Map(); // server key -> why it did not connect
+const needs = new Set(); // keys of this PC's web tools that asked for a sign-in
+const pendings = new Map(); // sign-ins under way: state -> { key, pending, at }
 
 // ---------- the stored document ----------
 
@@ -61,7 +67,7 @@ function freeKey(base, taken) {
 function load() {
   try {
     const d = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-    doc = { v: 1, at: Number(d.at) || 0, servers: d.servers || {}, envs: d.envs || {}, projectEnv: d.projectEnv || {}, defaultEnv: d.defaultEnv || '', approved: Array.isArray(d.approved) ? d.approved : [], machine: d.machine || os.hostname() };
+    doc = { v: 1, at: Number(d.at) || 0, servers: d.servers || {}, envs: d.envs || {}, projectEnv: d.projectEnv || {}, defaultEnv: d.defaultEnv || '', approved: Array.isArray(d.approved) ? d.approved : [], machine: d.machine || os.hostname(), local: d.local && typeof d.local === 'object' ? d.local : {}, localOff: Array.isArray(d.localOff) ? d.localOff : [] };
   } catch {
     // nothing saved yet
   }
@@ -91,8 +97,12 @@ function state() {
       fileNames: Object.keys(s.files || {}),
       on: s.on || '',
       viaCloud: viaCloud(s),
+      // A tool in Loop Cloud that signs in at its service: 'in', 'needed', or '' when it has no sign-in.
+      signIn: viaCloud(s) ? s.signIn || '' : '',
       here: !elsewhere(s),
       ask: asks(s),
+      // A GitHub connection signed in in Loop Cloud: git in its projects' sessions signs in through it.
+      git: viaCloud(s) && s.git === true,
       up: links.has(key) && links.get(key).ready,
       tools: links.has(key) ? links.get(key).tools.length : null,
       error: lastErr.get(key) || '',
@@ -101,6 +111,24 @@ function state() {
     projectEnv: { ...doc.projectEnv },
     defaultEnv: doc.envs[doc.defaultEnv] ? doc.defaultEnv : '',
     machine: doc.machine,
+    // Tools added on this PC, in Loop. They are this PC's own and go nowhere else.
+    local: Object.entries(doc.local).map(([key, s]) => ({
+      key,
+      name: s.name || key,
+      kind: s.kind,
+      command: s.kind === 'stdio' ? [s.command, ...(s.args || []).map((a) => (/\s/.test(a) ? `"${a}"` : a))].join(' ') : '',
+      url: s.url || '',
+      envNames: Object.keys(s.env || {}),
+      headerNames: Object.keys(s.headers || {}),
+      dir: s.dir || '',
+      // 'in' signed in, 'needed' it asked for a sign-in, '' it has none.
+      auth: oauth.signedIn(s.auth) ? 'in' : needs.has(key) ? 'needed' : '',
+      clientId: (s.client && s.client.id) || '',
+      on: !doc.localOff.includes(key),
+      up: links.has(key) && links.get(key).ready,
+      tools: links.has(key) ? links.get(key).tools.length : null,
+      error: lastErr.get(key) || '',
+    })),
   };
 }
 
@@ -120,6 +148,107 @@ function words(line) {
   const out = [];
   String(line || '').replace(/"([^"]*)"|'([^']*)'|(\S+)/g, (_m, a, b, c) => out.push(a ?? b ?? c));
   return out;
+}
+
+// ---------- tools on this PC ----------
+// Added here, in Loop, and kept in this PC's own file. Every session on this
+// PC gets the ones that are switched on, whichever agent it runs on, beside
+// the tools of its Loop Cloud environment. They are never sent to the cloud.
+
+const defOf = (key) => doc.servers[key] || doc.local[key] || null;
+// The ones switched on, for one project: a tool kept to a project is left out elsewhere.
+const localOn = (dir) => Object.keys(doc.local).filter((k) => !doc.localOff.includes(k) && !doc.servers[k] && (!doc.local[k].dir || doc.local[k].dir === dir));
+
+function saveLocal(o) {
+  const before = o.key ? doc.local[o.key] : null;
+  if (o.key && !before) return { ok: false, error: 'That tool is no longer there.' };
+  const built = buildTool(o, before);
+  if (built.error) return { ok: false, error: built.error };
+  const key = before ? o.key : freeKey(built.tool.name, { ...doc.servers, ...doc.local });
+  doc.local[key] = built.tool;
+  drop(key);
+  save(false);
+  return { ok: true, key };
+}
+
+function removeLocal(key) {
+  if (!doc.local[key]) return false;
+  delete doc.local[key];
+  needs.delete(key);
+  doc.localOff = doc.localOff.filter((k) => k !== key);
+  drop(key);
+  save(false);
+  return true;
+}
+
+function setLocalOn(key, on) {
+  if (!doc.local[key]) return false;
+  doc.localOff = doc.localOff.filter((k) => k !== key);
+  if (!on) {
+    doc.localOff.push(key);
+    drop(key);
+  }
+  save(false);
+  return true;
+}
+
+// Brings in the MCP servers an agent is already set up with on this PC. Ones
+// Loop has by name are left alone. Returns how many were added.
+function importLocal(file) {
+  const have = new Set(Object.values(doc.local).map((s) => s.name));
+  let added = 0;
+  for (const s of fromClaude(file)) {
+    if (have.has(s.name)) continue;
+    if (s.kind === 'stdio' && !doc.approved.includes(print(s))) doc.approved.push(print(s));
+    doc.local[freeKey(s.name, { ...doc.servers, ...doc.local })] = s;
+    have.add(s.name);
+    added += 1;
+  }
+  if (added) save(false);
+  return { ok: true, added };
+}
+
+// What a session on this PC works with: its environment's tools, and this
+// PC's own. Null when there is neither.
+function scopeOf(dir) {
+  const env = envOf(dir);
+  const mine = localOn(dir);
+  if (!env && !mine.length) return null;
+  return { id: env ? env.id : '', name: env ? env.name : 'This PC', only: env ? env.only === true : false, servers: [...(env ? (env.servers || []).filter((k) => doc.servers[k]) : []), ...mine] };
+}
+
+// A tool as it is stored, from what a form sent. { tool } or { error }.
+function buildTool(o, before) {
+  const name = String(o.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  if (!name) return { error: 'Give it a name.' };
+  const s = { name, kind: o.kind === 'http' ? 'http' : 'stdio' };
+  if (/^[A-Za-z0-9_-]+$/.test(String(o.dir || ''))) s.dir = String(o.dir); // kept to one project
+  if (s.kind === 'http') {
+    let u;
+    try {
+      u = new URL(String(o.url || '').trim());
+    } catch {
+      return { error: 'That web address is not valid.' };
+    }
+    if (!/^https?:$/.test(u.protocol)) return { error: 'The address must start with http:// or https://.' };
+    s.url = u.toString();
+    s.headers = pairs(o.headers, before ? before.headers : {});
+    // Loop registered by hand with the service: its client ID, and a secret if it gave one.
+    const id = String(o.clientId || '').trim().slice(0, 400);
+    const old = before && before.client;
+    if (id) s.client = { id, secret: String(o.clientSecret || '') || (old && old.id === id ? old.secret : '') };
+    // A sign-in is kept only for the address it was made for, and the same registration.
+    const same = before && before.kind === 'http' && before.auth && before.auth.origin === u.origin && ((before.client && before.client.id) || '') === id;
+    if (same) s.auth = before.auth;
+  } else {
+    const parts = words(o.command);
+    if (!parts.length) return { error: 'Give the command that starts it.' };
+    s.command = parts[0];
+    s.args = parts.slice(1);
+    s.env = pairs(o.env, before ? before.env : {});
+    if (!doc.approved.includes(print(s))) doc.approved.push(print(s)); // typed in on this PC
+  }
+  return { tool: s };
 }
 
 function saveServer(o) {
@@ -186,7 +315,7 @@ function removeEnv(id) {
 }
 
 function setProjectEnv(dir, id) {
-  if (id && id !== 'none' && !doc.envs[id]) return false;
+  if (id && id !== 'none' && id !== ALL && !doc.envs[id]) return false;
   if (id) doc.projectEnv[dir] = id;
   else delete doc.projectEnv[dir]; // back to the default
   save();
@@ -199,13 +328,18 @@ function setDefaultEnv(id) {
   return true;
 }
 
-// The environment a session works in: its project's, or the default. "none" on
-// a project means that project takes no environment even when there is a default.
+// "All tools": every tool connected on Loop Cloud, beside this PC's own. It is
+// what a project gets when nothing narrower was chosen, for it or for this PC.
+const ALL = '*';
+// The tools a session works with: its project's choice, or this PC's, or all
+// of them. ("none" on a project is an older choice, still kept: no cloud tools.)
 function envOf(dir) {
   const own = doc.projectEnv[dir];
   if (own === 'none') return null;
-  const id = doc.envs[own] ? own : doc.envs[doc.defaultEnv] ? doc.defaultEnv : '';
-  return id ? { id, ...doc.envs[id] } : null;
+  const id = own === ALL ? '' : doc.envs[own] ? own : doc.envs[doc.defaultEnv] ? doc.defaultEnv : '';
+  if (id) return { id, ...doc.envs[id] };
+  const servers = Object.keys(doc.servers);
+  return servers.length ? { id: ALL, name: 'All tools', servers, only: false } : null;
 }
 
 // ---------- bringing in what an agent already has ----------
@@ -410,9 +544,13 @@ class Link {
   }
 
   // A web tool answers a POST with JSON, or with a stream that carries the answer.
-  async post(msg, timeout) {
+  async post(msg, timeout, again) {
     const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(this.def.headers || {}) };
     const far = viaCloud(this.def);
+    if (!far && oauth.signedIn(this.def.auth)) {
+      if (oauth.stale(this.def.auth)) await renewNow(this.key, this.def).catch(() => {});
+      headers.Authorization = `Bearer ${this.def.auth.access}`;
+    }
     if (far) {
       // This call carries the machine's sign-in, so it goes to Loop Cloud and
       // nowhere else, whatever the document says.
@@ -431,6 +569,19 @@ class Link {
     const sid = res.headers.get('mcp-session-id');
     if (sid) this.session = sid;
     if (msg.id === undefined) return null;
+    if (res.status === 401 && !far && doc.local[this.key] && !Object.keys(this.def.headers || {}).some((n) => /^authorization$/i.test(n))) {
+      // Its token may just have run out: one fresh one, one more try.
+      if (!again && oauth.signedIn(this.def.auth) && this.def.auth.refresh) {
+        const fresh = await renewNow(this.key, this.def).then(
+          () => true,
+          () => false,
+        );
+        if (fresh) return this.post(msg, timeout, true);
+      }
+      const had = oauth.signedIn(this.def.auth);
+      needs.add(this.key);
+      throw new Error(had ? 'Its sign-in has run out. Press Sign in.' : 'It asks you to sign in. Press Sign in.');
+    }
     if (res.status === 401 || res.status === 403) throw new Error('It refused the key or token it was given.');
     if (!res.ok) throw new Error(`It answered ${res.status}.`);
     const type = res.headers.get('content-type') || '';
@@ -481,8 +632,135 @@ class Link {
 
 const plain = (e) => String((e && e.message) || e || 'It did not connect.').split('\n')[0].slice(0, 240);
 
+// ---------- signing in to a web tool on this PC ----------
+// The standard way (OAuth): Loop asks the server where its sign-in is, opens
+// that page in the browser, and the browser comes back to this PC with a code.
+// The token is kept in this PC's file and goes only to that tool.
+
+const appReq = async (url, o = {}) => {
+  const r = await fetch(url, { method: o.method || 'GET', headers: { 'User-Agent': 'Loop', ...(o.headers || {}) }, body: o.body, signal: AbortSignal.timeout(20e3) });
+  return { status: r.status, headers: Object.fromEntries(r.headers), text: await r.text() };
+};
+
+async function renewNow(key, def) {
+  const fresh = await oauth.renew(appReq, def.auth);
+  def.auth = fresh;
+  if (doc.local[key]) {
+    doc.local[key].auth = fresh;
+    save(false);
+  }
+}
+
+// Starts a sign-in and answers with the page to open: { ok, url } or { ok: false, error }.
+async function signIn(key) {
+  if (!doc.local[key] && doc.servers[key] && viaCloud(doc.servers[key])) return signInFar(key);
+  const def = doc.local[key];
+  if (!def || def.kind !== 'http') return { ok: false, error: 'Only a web address added on this PC is signed in to here.' };
+  try {
+    const b = await oauth.begin(appReq, def.url, `http://127.0.0.1:${port}/oauth/callback`, { clientId: def.client && def.client.id, clientSecret: def.client && def.client.secret });
+    if (!b.needed) return { ok: false, error: b.status >= 200 && b.status < 300 ? 'It answers without a sign-in.' : `It does not offer a sign-in (it answered ${b.status}). If it takes a key, put the key in its headers.` };
+    for (const [s, p] of pendings) if (Date.now() - p.at > 15 * 60e3) pendings.delete(s);
+    pendings.set(b.state, { key, pending: b.pending, at: Date.now() });
+    return { ok: true, url: b.url };
+  } catch (e) {
+    return { ok: false, error: plain(e) };
+  }
+}
+
+// A tool that runs in Loop Cloud, signed in from here. Loop Cloud finds the
+// page and keeps the sign-in; this PC only lends the address the browser comes
+// back to, which is what a service that turns a website away will accept.
+async function farCall(pathname, body) {
+  const mine = cloudHeaders() || {};
+  if (!cloudBase || !mine.Authorization) throw new Error('Sign in to Loop Cloud first.');
+  let r;
+  try {
+    r = await fetch(`${cloudBase}${pathname}`, { method: 'POST', headers: { ...mine, 'Content-Type': 'application/json' }, body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(60e3) });
+  } catch (e) {
+    throw new Error(e.name === 'TimeoutError' ? 'Loop Cloud did not answer.' : 'Could not reach Loop Cloud.');
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `Loop Cloud answered ${r.status}.`);
+  return j;
+}
+
+async function signInFar(key) {
+  try {
+    const j = await farCall(`/api/tools/servers/${encodeURIComponent(key)}/signin`, { redirect: `http://127.0.0.1:${port}/oauth/callback` });
+    if (!/^https?:\/\//.test(String(j.url)) || !j.state) throw new Error('Loop Cloud gave no sign-in page.');
+    for (const [s, p] of pendings) if (Date.now() - p.at > 15 * 60e3) pendings.delete(s);
+    pendings.set(String(j.state), { key, far: true, at: Date.now() });
+    return { ok: true, url: String(j.url) };
+  } catch (e) {
+    return { ok: false, error: plain(e) };
+  }
+}
+
+function signOut(key) {
+  const def = doc.local[key];
+  if (!def || !def.auth) return false;
+  delete def.auth;
+  drop(key);
+  save(false);
+  onChange(state());
+  return true;
+}
+
+// The browser coming back from the sign-in page. Answers what to show there.
+async function signedBack(q) {
+  const p = pendings.get(String(q.get('state') || ''));
+  // Not one this app started: it was started on the Loop Cloud website, for a
+  // service that sends people back only to their own computer. The code is
+  // handed to Loop Cloud, which knows the sign-in by its state and trades it there.
+  // (A link of this app's own that was already used is not one of those: its code goes nowhere.)
+  if (!p && !spent.has(String(q.get('state'))) && q.get('state') && (q.get('code') || q.get('error'))) {
+    try {
+      const r = await farCall('/api/tools/oauth/finish', { state: q.get('state'), code: q.get('code') || '', error: q.get('error_description') || q.get('error') || '' });
+      await Promise.resolve(cloudRefresh()).catch(() => {});
+      return { ok: true, text: `You are signed in${r && r.name ? ` to ${r.name}` : ''}. It is ready on every machine. You can close this tab and go back to Loop Cloud.` };
+    } catch (e) {
+      // When this app could not hand it over (not signed in to Loop Cloud, or no connection), the website still can.
+      const stuck = /Sign in to Loop Cloud first|Could not reach|did not answer/.test(plain(e));
+      return { ok: false, text: stuck ? `${plain(e)} Copy this page's address and paste it into the box on the Loop Cloud website: the sign-in finishes there.` : plain(e) };
+    }
+  }
+  if (!p || Date.now() - p.at > 15 * 60e3) return { ok: false, text: 'This sign-in link was already used, or is too old. Press Sign in again in Loop.' };
+  pendings.delete(q.get('state'));
+  spent.add(String(q.get('state')));
+  if (spent.size > 300) spent.delete(spent.values().next().value);
+  if (p.far) {
+    const name = (doc.servers[p.key] && doc.servers[p.key].name) || p.key;
+    try {
+      await farCall('/api/tools/oauth/finish', { state: q.get('state'), code: q.get('code') || '', error: q.get('error_description') || q.get('error') || '' });
+    } catch (e) {
+      return { ok: false, text: plain(e) };
+    }
+    lastErr.delete(p.key);
+    await Promise.resolve(cloudRefresh()).catch(() => {});
+    test(p.key);
+    return { ok: true, text: `You are signed in to ${name}. It is ready on every machine. You can close this tab and go back to Loop.` };
+  }
+  const def = doc.local[p.key];
+  if (!def) return { ok: false, text: 'That tool is no longer in Loop.' };
+  if (q.get('error') || !q.get('code')) return { ok: false, text: `${def.name} did not sign you in${q.get('error_description') || q.get('error') ? `: ${String(q.get('error_description') || q.get('error')).slice(0, 200)}` : '.'}` };
+  try {
+    def.auth = await oauth.finish(appReq, p.pending, q.get('code'));
+  } catch (e) {
+    return { ok: false, text: plain(e) };
+  }
+  needs.delete(p.key);
+  save(false);
+  test(p.key); // connects with the new sign-in and tells the windows
+  return { ok: true, text: `You are signed in to ${def.name}. You can close this tab and go back to Loop.` };
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const backPage = (r) =>
+  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Loop</title><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1118;color:#e6edf3;font:16px/1.5 system-ui,sans-serif"><div style="max-width:420px;padding:28px;text-align:center"><div style="font-size:20px;font-weight:650;margin-bottom:8px">${r.ok ? 'Signed in' : 'Not signed in'}</div><div style="color:#9aa7b4">${esc(r.text)}</div></div>`;
+
 function drop(key) {
-  if (!doc.servers[key] && FILE) fs.rmSync(path.join(path.dirname(FILE), 'mcp-files', key), { recursive: true, force: true });
+  farGit.clear(); // a sign-in handed over for git is not kept past a change
+  if (!defOf(key) && FILE) fs.rmSync(path.join(path.dirname(FILE), 'mcp-files', key), { recursive: true, force: true });
   const l = links.get(key);
   if (l) l.close();
   links.delete(key);
@@ -490,7 +768,7 @@ function drop(key) {
 }
 
 async function linkTo(key) {
-  const def = doc.servers[key];
+  const def = defOf(key);
   if (!def) throw new Error('That tool is no longer set up in Loop.');
   if (elsewhere(def)) throw new Error(`It lives on ${def.on}, not on this machine.`);
   if (asks(def)) {
@@ -538,13 +816,13 @@ const META = [
 // Every tool of an environment, named "<server>__<tool>". A server that will
 // not connect is left out and remembered, so one broken tool does not cost the rest.
 async function toolsOf(env) {
-  const keys = (env.servers || []).filter((k) => doc.servers[k]);
+  const keys = (env.servers || []).filter((k) => defOf(k));
   const got = await Promise.all(keys.map((k) => linkTo(k).then((l) => [k, l], () => [k, null])));
   const out = [];
   for (const [key, l] of got) {
     if (!l) continue;
     for (const t of l.tools) {
-      out.push({ ...t, name: `${key}${SEP}${t.name}`, description: `[${doc.servers[key].name}] ${t.description || ''}`.trim() });
+      out.push({ ...t, name: `${key}${SEP}${t.name}`, description: `[${defOf(key).name}] ${t.description || ''}`.trim() });
     }
   }
   return out;
@@ -555,18 +833,18 @@ const textResult = (text, isError) => ({ content: [{ type: 'text', text }], ...(
 async function runTool(env, name, args) {
   const i = name.indexOf(SEP);
   const key = i > 0 ? name.slice(0, i) : '';
-  if (!key || !(env.servers || []).includes(key) || !doc.servers[key]) return textResult(`There is no tool "${name}" in the ${env.name} environment. Call loop_find_tools to see what is there.`, true);
+  if (!key || !(env.servers || []).includes(key) || !defOf(key)) return textResult(`There is no tool "${name}" among your Loop tools. Call loop_find_tools to see what is there.`, true);
   try {
     const l = await linkTo(key);
     return await l.ask('tools/call', { name: name.slice(i + SEP.length), arguments: args || {} });
   } catch (e) {
-    return textResult(`${doc.servers[key].name} did not answer: ${plain(e)}`, true);
+    return textResult(`${defOf(key).name} did not answer: ${plain(e)}`, true);
   }
 }
 
 async function handle(msg, dir) {
   const reply = (result) => ({ jsonrpc: '2.0', id: msg.id, result });
-  const env = envOf(dir);
+  const env = scopeOf(dir);
   switch (msg.method) {
     case 'initialize':
       return reply({
@@ -588,7 +866,7 @@ async function handle(msg, dir) {
         const q = String((p.arguments && p.arguments.query) || '').toLowerCase().split(/\s+/).filter(Boolean);
         const all = await toolsOf(env);
         const hit = all.filter((t) => q.every((w) => `${t.name} ${t.description}`.toLowerCase().includes(w)));
-        const missing = (env.servers || []).filter((k) => doc.servers[k] && lastErr.has(k)).map((k) => `${doc.servers[k].name}: ${lastErr.get(k)}`);
+        const missing = (env.servers || []).filter((k) => defOf(k) && lastErr.has(k)).map((k) => `${defOf(k).name}: ${lastErr.get(k)}`);
         return reply(
           textResult(
             JSON.stringify({ environment: env.name, tools: hit.slice(0, 60).map((t) => ({ name: t.name, description: (t.description || '').slice(0, 300), inputSchema: t.inputSchema })), more: Math.max(0, hit.length - 60), notConnected: missing }, null, 1),
@@ -609,6 +887,31 @@ function listen() {
       res.writeHead(code, body ? { 'Content-Type': 'application/json' } : {});
       res.end(body ? JSON.stringify(body) : undefined);
     };
+    if (req.method === 'GET' && /^\/oauth\/callback\?/.test(req.url || '')) {
+      return signedBack(new URL(req.url, 'http://127.0.0.1').searchParams).then((r) => {
+        res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(backPage(r));
+      });
+    }
+    // git in a session, asking for its GitHub sign-in.
+    const g = /^\/git\/([a-f0-9]+)\/([A-Za-z0-9_-]+)$/.exec(req.url || '');
+    if (g) {
+      if (g[1] !== secret || req.method !== 'POST') return send(404);
+      let asked = '';
+      req.on('data', (c) => {
+        asked += c;
+        if (asked.length > 8000) req.destroy();
+      });
+      req.on('end', () =>
+        gitAnswer(g[2], asked)
+          .catch(() => '')
+          .then((text) => {
+            res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+            res.end(text);
+          }),
+      );
+      return undefined;
+    }
     const m = /^\/hub\/([a-f0-9]+)\/([A-Za-z0-9_-]+)\/([0-9a-f-]{36})\/?$/.exec(req.url || '');
     if (!m || m[1] !== secret || !UUID_RE.test(m[3])) return send(404);
     if (req.method === 'DELETE') return send(200);
@@ -634,6 +937,7 @@ function listen() {
       send(200, Array.isArray(msg) ? out : out[0]);
     });
   });
+  listenBack();
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       port = server.address().port;
@@ -642,11 +946,139 @@ function listen() {
   });
 }
 
+// The one address that does not change between starts, because the Loop Cloud
+// website has to name it before it knows anything about this computer: a
+// sign-in started there, for a service that sends people back only to their own
+// computer, comes back here. If another program holds the port, nothing is
+// lost: the browser shows the address and the person pastes it into the website.
+const BACK_PORT = 47823;
+function listenBack(at = BACK_PORT) {
+  if (backServer) return;
+  const srv = http.createServer((req, res) => {
+    if (req.method !== 'GET' || !/^\/oauth\/callback\?/.test(req.url || '')) {
+      res.writeHead(404);
+      return res.end();
+    }
+    return signedBack(new URL(req.url, 'http://127.0.0.1').searchParams).then((r) => {
+      res.writeHead(r.ok ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(backPage(r));
+    });
+  });
+  srv.on('error', () => {
+    if (backServer === srv) backServer = null;
+  });
+  backServer = srv;
+  srv.listen(at, '127.0.0.1');
+}
+
+// ---------- git, signed in through Loop Cloud ----------
+// git in a session of a project that has a GitHub connection is signed in to
+// GitHub through Loop, so clone, pull and push work on a machine that was
+// never signed in to GitHub. The connection is signed in once, in Loop Cloud,
+// and stays there. When git asks, this machine is handed its token of the
+// hour, keeps it in memory for a few minutes, and never has the part that
+// renews it. A token that sits on this machine is never used for this.
+// Nothing is written to git's own settings: it lasts as long as the session,
+// and only for github.com.
+
+// The GitHub connections in Loop Cloud that a project's sessions have.
+function gitFar(dir) {
+  const env = scopeOf(dir);
+  return env ? env.servers.filter((key) => doc.servers[key] && viaCloud(doc.servers[key]) && doc.servers[key].git === true) : [];
+}
+const farGit = new Map(); // tools + repo -> { text, until }: what Loop Cloud last handed over
+const ghWho = new Map(); // connection -> { name, email } for commits
+
+// What git asked ("protocol=https", "host=github.com", "path=owner/repo.git")
+// and what it is told back, in git's own credential format. '' when it is not
+// Loop's to answer.
+async function gitAnswer(dir, asked) {
+  const q = {};
+  for (const line of String(asked).split(/\r?\n/)) {
+    const at = line.indexOf('=');
+    if (at > 0) q[line.slice(0, at)] = line.slice(at + 1);
+  }
+  if (q.protocol !== 'https' || String(q.host || '').toLowerCase() !== 'github.com') return '';
+  const far = gitFar(dir);
+  if (!far.length) return '';
+  const repo = String(q.path || '')
+    .replace(/^\/+/, '')
+    .replace(/\.git$/, '')
+    .split('/')
+    .slice(0, 2)
+    .join('/');
+  const id = far.join(',') + ' ' + repo.toLowerCase();
+  const have = farGit.get(id);
+  if (have && Date.now() < have.until) return have.text;
+  try {
+    // With several connections, Loop Cloud gives the one that can see the repo.
+    const j = await farCall('/api/git/credential', { host: 'github.com', repo, tools: far });
+    if (!j.password) return '';
+    const text = 'username=' + String(j.username || 'x-access-token') + '\npassword=' + String(j.password) + '\n';
+    // One clone asks several times. Kept five minutes at most, and never past its own end.
+    farGit.set(id, { text, until: Math.min(Date.now() + 5 * 60e3, (Number(j.expires) || 0) - 60e3) });
+    return text;
+  } catch (e) {
+    lastErr.set(far[0], plain(e));
+    onChange(state());
+    return '';
+  }
+}
+
+let gitHasName = null; // whether git on this machine already knows who commits
+function gitKnowsName() {
+  if (gitHasName !== null) return gitHasName;
+  try {
+    const out = require('child_process').execFileSync('git', ['config', '--global', 'user.email'], { encoding: 'utf8', timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    gitHasName = Boolean(out.trim());
+  } catch {
+    gitHasName = false; // not set, or no git: nothing to keep
+  }
+  return gitHasName;
+}
+
+// What a session starts with so that its git signs in to GitHub through Loop.
+// {} when its project has no GitHub connection that is signed in.
+async function gitEnv(dir) {
+  const far = /^[A-Za-z0-9_-]+$/.test(dir || '') && port ? gitFar(dir) : [];
+  if (!far.length) return {};
+  // git runs this through its own sh, on Windows too. Only "get" is answered:
+  // Loop is never asked to store or forget a sign-in.
+  const ask = '!f() { test "$1" = get && curl -s --max-time 25 --data-binary @- http://127.0.0.1:' + port + '/git/' + secret + '/' + dir + '; }; f';
+  const out = {
+    GIT_CONFIG_COUNT: '3',
+    // An empty value first: no other helper, and no sign-in window, is tried for github.com.
+    GIT_CONFIG_KEY_0: 'credential.https://github.com.helper',
+    GIT_CONFIG_VALUE_0: '',
+    GIT_CONFIG_KEY_1: 'credential.https://github.com.helper',
+    GIT_CONFIG_VALUE_1: ask,
+    // git says which repo it is for, so the right connection can be chosen.
+    GIT_CONFIG_KEY_2: 'credential.https://github.com.useHttpPath',
+    GIT_CONFIG_VALUE_2: 'true',
+  };
+  // A machine where git was never told who commits: the person behind the first connection.
+  if (!gitKnowsName()) {
+    if (!ghWho.has(far[0])) {
+      const me = await farCall('/api/git/who', { tools: far }).catch(() => null);
+      if (me && me.name && me.email) ghWho.set(far[0], { name: String(me.name), email: String(me.email) });
+    }
+    const who = ghWho.get(far[0]);
+    if (who) Object.assign(out, { GIT_AUTHOR_NAME: who.name, GIT_AUTHOR_EMAIL: who.email, GIT_COMMITTER_NAME: who.name, GIT_COMMITTER_EMAIL: who.email });
+  }
+  return out;
+}
+// For tests: whether this machine's git has a name.
+const gitTesting = (o) => {
+  if ('knowsName' in o) gitHasName = o.knowsName;
+  ghWho.clear();
+  farGit.clear();
+};
+
 // The entry a session's tool file gets, or null when its project has no environment.
 function entryFor(dir, sessionId) {
-  const env = envOf(dir);
+  const env = scopeOf(dir);
   if (!port || !env || !/^[A-Za-z0-9_-]+$/.test(dir || '') || !UUID_RE.test(sessionId || '')) return null;
-  return { name: 'loop', only: env.only !== false, env: env.name, server: { type: 'http', url: `http://127.0.0.1:${port}/hub/${secret}/${dir}/${sessionId}` } };
+  return { name: 'loop', only: env.only === true, env: env.name, server: { type: 'http', url: `http://127.0.0.1:${port}/hub/${secret}/${dir}/${sessionId}` } };
 }
 
 // Writes the --mcp-config file for one session: Loop's memory (when it has
@@ -678,6 +1110,13 @@ function adopt(theirs, machine) {
   for (const k of Object.keys(doc.servers)) if (JSON.stringify(next.servers[k]) !== JSON.stringify(doc.servers[k])) drop(k);
   doc.servers = next.servers;
   doc.envs = next.envs;
+  for (const k of Object.keys(doc.local)) {
+    if (!doc.servers[k]) continue;
+    const moved = freeKey(`${k}-pc`, { ...doc.servers, ...doc.local });
+    doc.local[moved] = doc.local[k];
+    delete doc.local[k];
+    doc.localOff = doc.localOff.map((x) => (x === k ? moved : x));
+  }
   // A tool that is gone takes its files off this machine with it.
   const kept = path.join(path.dirname(FILE), 'mcp-files');
   try {
@@ -732,6 +1171,7 @@ async function init(userData, opts = {}) {
   onChange = opts.onChange || (() => {});
   cloudHeaders = opts.cloudHeaders || (() => ({}));
   cloudBase = String(opts.cloudBase || '').replace(/\/+$/, '');
+  cloudRefresh = opts.cloudRefresh || (async () => {});
   load();
   await listen();
   sweep = setInterval(() => {
@@ -745,8 +1185,10 @@ function stop() {
   if (sweep) clearInterval(sweep);
   for (const key of [...links.keys()]) drop(key);
   if (server) server.close();
+  if (backServer) backServer.close();
   server = null;
+  backServer = null;
   port = 0;
 }
 
-module.exports = { fileFor, init, stop, state, saveServer, removeServer, saveEnv, removeEnv, setProjectEnv, setDefaultEnv, envOf, importClaude, fromClaude, test, entryFor, adopt, approve, trust, handle, words, pairs };
+module.exports = { gitEnv, gitTesting, signIn, signOut, saveLocal, removeLocal, setLocalOn, importLocal, scopeOf, fileFor, init, stop, state, saveServer, removeServer, saveEnv, removeEnv, setProjectEnv, setDefaultEnv, envOf, importClaude, fromClaude, test, entryFor, adopt, approve, trust, handle, words, pairs };

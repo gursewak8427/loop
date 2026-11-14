@@ -290,7 +290,7 @@ function tabNode(g, id) {
             ? {
                 label: `Switch account (now ${accountById(tab.account).name})`,
                 icon: 'person',
-                run: () => accountMenu(e.clientX, e.clientY, `Run ${tabTitle(tab)} as`, tab.account, null, (pick) => switchAccount(tab, pick)),
+                sub: (el) => beside(el, () => accountMenu(e.clientX, e.clientY, `Run ${tabTitle(tab)} as`, tab.account, null, (pick) => switchAccount(tab, pick))),
               }
             : null,
           tab.sessionId ? { label: 'Knowledge base', icon: 'book', run: () => openDrawer(tab.dir, tab.sessionId) } : null,
@@ -520,6 +520,7 @@ function specOf(tab) {
     account: tab.account,
     server: tab.server,
     exited: tab.exited,
+    ...(tab.kind === 'agent' ? { agent: tab.agent, agentAccount: tab.agentAccount, agentSession: tab.agentSession, memberId: tab.memberId, native: tab.native } : {}),
     snapshot: snapshot + tab.pending.join(''),
   };
 }
@@ -563,9 +564,66 @@ function wireWindows() {
     );
   });
   deck.onAdoptTabs((specs) => {
-    for (const spec of specs) createTab({ ...spec, adopt: true });
+    for (const spec of specs) if (!S.tabs.has(spec.id)) createTab({ ...spec, adopt: true });
   });
+  // Loop was opened in a browser on another device: every tab here moves there,
+  // so that device shows what is open. They come back when it goes away.
+  deck.onLendTabs((reqId) => {
+    const specs = S.order.map((id) => specOf(S.tabs.get(id)));
+    deck.reply(reqId, { specs, active: S.active });
+    for (const s of specs) detachTab(s.id);
+  });
+  deck.onDeskLent((list) => {
+    S.lent = new Map((list || []).map((l) => [l.id, l.sessionId]));
+    renderEmpty();
+    renderList();
+    paintLent();
+  });
+  if (!S.remote && !S.child) {
+    deck
+      .deskLent()
+      .then((list) => {
+        S.lent = new Map((list || []).map((l) => [l.id, l.sessionId]));
+        paintLent();
+      })
+      .catch(() => {});
+    // One closed over there is no longer lent: looked at again now and then while any are.
+    setInterval(() => S.lent && S.lent.size && deck.deskLent().then((list) => list.length !== S.lent.size && ((S.lent = new Map(list.map((l) => [l.id, l.sessionId]))), renderEmpty(), renderList(), paintLent())), 15000);
+  }
   deck.onTabShow((id) => S.tabs.has(id) && activate(id));
+}
+
+// Bring back every tab that is open in a browser on another device.
+async function recallLent() {
+  let n = 0;
+  for (const id of [...(S.lent || new Map()).keys()]) {
+    if (S.tabs.has(id)) continue;
+    const spec = await deck.claimTab(id);
+    if (spec) {
+      createTab({ ...spec, adopt: true });
+      n++;
+    }
+  }
+  if (!n) toast('Nothing could be brought back. The other device may have closed them.', true);
+}
+
+// A line across the top of this PC's window while its tabs are on another device:
+// where they went, and one button to have them here again.
+function paintLent() {
+  const n = (S.lent || new Map()).size;
+  let bar = document.querySelector('#lent-bar');
+  if (!n || S.remote) return bar && bar.remove();
+  if (!bar) {
+    bar = h('div#lent-bar', { role: 'status' });
+    const main = document.querySelector('#main') || document.body;
+    main.prepend(bar);
+  }
+  put(
+    bar,
+    icon('phone'),
+    h('span', {}, n === 1 ? 'One session is open in Loop on another device.' : `${n} sessions are open in Loop on another device.`, ' They come back here when it closes.'),
+    h('button.btn.small', { onclick: recallLent }, 'Bring back now'),
+  );
 }
 
 // Take over a terminal that is already running: show what was on its screen, then follow it live.

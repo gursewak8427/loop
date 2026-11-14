@@ -754,8 +754,12 @@ function openMember(p, s) {
   return openHere(p, s);
 }
 
-// Where a goal from you enters the team: the CEO, else the CTO, else the project manager.
+// Where a goal from you enters the project: the session you made boss, else
+// the team's CEO, else the CTO, else the project manager.
 function goalTaker(p) {
+  const boss = bossOf(p);
+  const marked = boss && boss.marked && p.sessions.find((s) => s.id === boss.id);
+  if (marked) return marked;
   const t = teamOf(p.dir);
   if (!t) return null;
   const order = ['ceo', 'cto', ...t.roles.filter((r) => r.manages).map((r) => r.key)];
@@ -769,10 +773,15 @@ function goalTaker(p) {
 // Hand a goal to the team: it goes to one session as a message, and the roles
 // pass it on from there.
 async function giveGoal(p, s, goal) {
-  const r = await sayTo(p, s, GOAL_WORDS(goal));
+  const r = await sayTo(p, s, goalWords(p, s, goal));
   if (!r.ok) return toast(`${sessionTitle(s)} did not take the goal: ${r.text || 'Loop could not reach it.'}`, true);
-  toast(`Goal given to ${sessionTitle(s)}. Watch the board for the tickets.`);
+  toast(`Goal given to ${sessionTitle(s)}. ${roleOf(p.dir, s.id) ? 'Watch the board for the tickets.' : 'Watch the mailbox for who it gives the work to.'}`);
 }
+
+// A boss that holds no team role has no role brief to read: it works from the mailbox.
+const BOSS_GOAL_WORDS = (goal) =>
+  `New goal from the user for the team: ${goal} | Call mailbox_list. Do small jobs yourself; hand the rest to the session you choose with mailbox_send (to its name, text a ticket of 150 words or fewer): that wakes it if it is closed. Reply first with the plan in 3 bullets, then report back here when it is done.`;
+const goalWords = (p, s, goal) => (roleOf(p.dir, s.id) ? GOAL_WORDS(goal) : BOSS_GOAL_WORDS(goal));
 
 const GOAL_WORDS = (goal) =>
   `New goal from the user for the team: ${goal} | Call role_brief. Do small jobs yourself; hand bigger work straight to the teammate who does it with team_manage (action tell, session their name, text a ticket of 150 words or fewer): that reaches a teammate whether or not it is running. Reply first with the plan in 3 bullets, then report back here in the company report format when it is done.`;
@@ -817,6 +826,7 @@ async function tellMembers(p, text) {
 // made themselves (the phone), which no role may refuse.
 async function teamCommand(q) {
   if (String(q.action || '').startsWith('subsession_')) return subCommand(q);
+  if (String(q.action || '').startsWith('mail_')) return mailCommand(q);
   const p = projectByDir(q.dir);
   if (!p || p.server) return 'This project is not one Loop can manage a team for.';
   const stored = () => (S.config.projectTeam || {})[p.dir];
@@ -884,7 +894,10 @@ async function teamCommand(q) {
     // Work handed over goes in as a message to the session itself, not as
     // keystrokes into a terminal: it arrives whole, it arrives whether or not
     // the teammate is running, and nothing depends on what is on a screen.
+    const wasUp = S.live.has(s.id) || Boolean(tabFor(s.id));
     const r = await sayTo(p, s, said);
+    // A hand-over between teammates is mailbox traffic too: it shows in the project's mailbox panel.
+    mailLog(p, { kind: 'send', from, to: nameOf(s), text, result: r.ok ? (wasUp ? 'delivered' : 'woken') : 'failed', note: r.ok ? '' : r.text || 'Loop could not reach it.' });
     if (!r.ok) return `"${nameOf(s)}" did not take it: ${r.text || 'Loop could not reach it.'}`;
     return `Sent to "${nameOf(s)}" as a message; it is working on it now. It reports back to you when it is done. Carry on with your own part meanwhile, and read the board for progress rather than asking.`;
   }
@@ -1124,7 +1137,7 @@ function openBoard(p) {
   }
 
   const goalBar = h('form.board-goal');
-  const goalInput = h('input', { type: 'text', placeholder: 'A goal for the team, for example: add a dark mode to the settings page' });
+  const goalInput = h('input', { type: 'text', placeholder: 'A goal, for example: add a dark mode to the settings page' });
   const paintGoal = () => {
     const taker = goalTaker(p);
     goalBar.hidden = !taker;

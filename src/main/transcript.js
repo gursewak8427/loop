@@ -329,7 +329,7 @@ function leadReport(turns) {
           continue;
         }
         if (u.role === 'user') break; // the goal
-        if (u.role === 'tool' && /team_manage$/.test(u.name) && (u.text === 'tell' || u.text === 'wake' || u.text === 'start')) handed = true;
+        if (u.role === 'tool' && ((/team_manage$/.test(u.name) && (u.text === 'tell' || u.text === 'wake' || u.text === 'start')) || /mailbox_send$/.test(u.name))) handed = true;
       }
       // Only a message the lead marked "Plan:" asks for an OK (a misread
       // progress report would ask the user to approve work already done).
@@ -360,7 +360,7 @@ function leadReport(turns) {
       if (/^(?:From .+ on the team:|Session message from ")/.test(words) || /^(?:OK|Okay)[,.!]? go ahead\.?$/i.test(words)) continue;
       goal = words
         .replace(/^New goal from the user for the team:\s*/, '')
-        .replace(/\s*\|\s*Call role_brief[\s\S]*$/, '')
+        .replace(/\s*\|\s*Call (?:role_brief|mailbox_list)[\s\S]*$/, '')
         .replace(/^(?:New (?:technical |business )?goal|Goal)\s*:\s*/i, '')
         .trim();
       goalAt = u.at || 0;
@@ -486,7 +486,7 @@ function userText(text, id, at) {
   const clean = t
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
     // What Loop adds to a hand-over or a goal is for Claude, not for reading.
-    .replace(/\s*\|\s*(?:If this is work for you:|When it is done, reply to|Call role_brief)[\s\S]*$/, '')
+    .replace(/\s*\|\s*(?:If this is work for you:|If this answers what you sent:|When it is done, reply to|Call role_brief|Call mailbox_list)[\s\S]*$/, '')
     .trim();
   if (!clean) return null;
   // A message one session sent another: shown as from that session, by name.

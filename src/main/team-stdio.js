@@ -81,6 +81,12 @@ function wake(id, text) {
 
 // team_manage. The team itself is changed from Loop; here a member reaches a teammate.
 async function teamDo(q) {
+  if (q.action === 'mail_list') {
+    const t = teamOf(q.dir);
+    if (!t) return 'On this server the mailbox reaches the sessions of the team, and this project has no team here.';
+    return 'Sessions of this project on this server:\n' + Object.keys(t.members).map((id) => `- "${nameOf(t, id)}"${id === q.me ? ' (you)' : ''}`).join('\n') + '\nSend with mailbox_send (to: the name).';
+  }
+  if (q.action === 'mail_send') q = { ...q, action: 'tell' };
   if (q.action !== 'tell' && q.action !== 'wake') return 'On this server the team is changed from Loop. Here you can tell or wake a teammate (action tell, session their name, text what you need).';
   const t = teamOf(q.dir);
   if (!t) return 'This project has no team on this server.';
