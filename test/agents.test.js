@@ -126,3 +126,15 @@ test('the model a Codex conversation last ran on is read from its file', () => {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("a session on ChatGPT is given Loop's tools; an agent Loop cannot hand them to is started as before", () => {
+  const url = 'http://127.0.0.1:51234/hub/0123abcd/D--work-shop/11111111-2222-3333-4444-555555555555';
+  assert.strictEqual(agents.withTools('codex --model gpt-5', 'codex', url), `codex -c mcp_servers.loop.url=${url} --model gpt-5`);
+  assert.strictEqual(agents.withTools('kimi', 'kimi', url), 'kimi');
+  // Only Loop's own address on this PC is ever written into a command line.
+  assert.strictEqual(agents.withTools('codex', 'codex', 'http://127.0.0.1:1/hub/ab/x/11111111-2222-3333-4444-555555555555 & calc'), 'codex');
+  assert.strictEqual(agents.withTools('codex', 'codex', 'https://evil.example/hub/ab/x/11111111-2222-3333-4444-555555555555'), 'codex');
+  assert.strictEqual(agents.withTools('codex', 'codex', ''), 'codex');
+  assert.strictEqual(agents.takesTools('codex'), true);
+  assert.strictEqual(agents.takesTools('grok'), false);
+});

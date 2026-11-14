@@ -26,7 +26,7 @@ const toPhone = (msg) => deck.phoneOut(msg);
 // A list row's preview: the words, not what Loop wraps around a hand-over or a goal.
 const previewOf = (t) =>
   String(t || '')
-    .replace(/\s*\|\s*(?:If this is work for you:|When it is done, reply to|Call role_brief)[\s\S]*$/, '')
+    .replace(/\s*\|\s*(?:If this is work for you:|If this answers what you sent:|When it is done, reply to|Call role_brief|Call mailbox_list)[\s\S]*$/, '')
     .replace(/^New goal from the user for the team:\s*/, 'Goal: ')
     .trim();
 
@@ -413,7 +413,7 @@ function stillTyped(tab, probe) {
   const rows = screenRows(tab);
   for (let i = rows.length - 1; i >= Math.max(0, rows.length - 10); i--) {
     const r = rows[i].replace(/^[\s│|]+/, '');
-    if (/^(>|❯)\s/.test(r)) return r.replace(/\s+/g, ' ').includes(probe.slice(0, Math.min(probe.length, r.length)));
+    if (/^(>|❯|›)\s/.test(r)) return r.replace(/\s+/g, ' ').includes(probe.slice(0, Math.min(probe.length, r.length)));
   }
   return false;
 }
@@ -780,7 +780,7 @@ async function phoneAction(c, req) {
     const team = teamOf(p.dir);
     const named = req.sessionId && team && team.members[req.sessionId] ? p.sessions.find((s) => s.id === req.sessionId) : null;
     const taker = named || goalTaker(p);
-    need(taker, 'That project has no team to take a goal. Set one up on the PC.');
+    need(taker, 'That project has nobody to take a goal. Make a session its boss on the PC.');
     const goal = String(req.text || '').trim().slice(0, 2000);
     need(goal, 'Write the goal first.');
     // The same words the PC gives a goal in, delivered the way a phone's own
@@ -789,7 +789,7 @@ async function phoneAction(c, req) {
     const r = await phoneSend(c, {
       dir: p.dir,
       sessionId: taker.id,
-      text: `New goal from the user for the team: ${goal} | Call role_brief. Do small jobs yourself; hand bigger work straight to the teammate who does it with team_manage (action tell, session their name, text a ticket of 150 words or fewer) - that wakes them if they are not running; ListAgents and SendMessage will not find them. Reply first with the plan in 3 bullets, then report back here in the company report format when it is done.`,
+      text: goalWords(p, taker, goal),
     });
     if (!r.ok) return r;
     return { ok: true, text: `Given to ${sessionTitle(taker)}.`, data: { sessionId: taker.id, dir: p.dir, title: sessionTitle(taker) } };

@@ -81,10 +81,11 @@ function broadcast(ch, ...args) {
 }
 
 // A browser that showed a key this PC gave out: from now on it is a window.
-function attach(ws) {
+function attach(ws, viewer) {
   const sender = Object.assign(new EventEmitter(), {
     id: 900000 + ++seq,
     loopRemote: true,
+    viewer: String(viewer || '').slice(0, 60), // which browser this is, for "open in Chrome on Android"
     closed: false,
     isDestroyed: () => sender.closed,
     send: (ch, ...args) => {

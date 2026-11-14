@@ -83,7 +83,7 @@ function paletteItems() {
     { label: 'Accessible on the internet', hint: 'Open this PC from loop.prismaple.com and the phone app', glyph: 'cloud', rank: 2.3, run: openInternet },
     ...(S.remote ? [] : [{ label: 'Tools', hint: 'Choose the environment of MCP tools this PC uses', glyph: 'gear', rank: 2.2, run: openTools }]),
     { label: 'Settings', hint: '', glyph: 'gear', rank: 2, run: openSettings },
-    ...(S.remote ? [] : [{ label: 'Check for updates', hint: S.update ? `Loop ${S.update.version}` : '', glyph: 'download', rank: 1.9, run: checkForUpdates }]),
+    ...(S.remote ? [] : [{ label: 'Check for updates', hint: S.update ? `Loop ${S.update.version}` : '', glyph: 'download', rank: 1.9, run: () => openSettings('updates') }]),
   );
   return items;
 }
@@ -903,6 +903,8 @@ function openAgentSession(rec, activateIt = true) {
     save();
   }
   if (!rec.native && ['codex', 'kimi'].includes(rec.agent)) watchNative(rec);
+  // What it was to be told while it was closed (that it is the boss, say).
+  tellOnOpen(rec, agentTabFor(rec.id));
   renderList();
 }
 
@@ -994,6 +996,7 @@ function agentRows(p) {
               },
             },
             { label: 'Runs on', hint: runsOnLine(p, { id: rec.memberId, name: rec.name, agent: rec.agent, rec }), icon: 'spark', sub: (el) => runsOnPicker(el, p, { id: rec.memberId, name: rec.name, agent: rec.agent, rec }) },
+            bossItem(p, rec.memberId, rec.name),
             {
               label: 'Remove from Loop',
               icon: 'trash',
@@ -1011,6 +1014,7 @@ function agentRows(p) {
       },
       brandIcon(rec.agent),
       h('span.title', {}, rec.name),
+      bossTag(p, rec.memberId),
       (() => {
         const acct = agentAccountOf(rec);
         return acct.multi ? h('span.acct', { style: `--acct:${acct.color}`, title: `Account: ${acct.name}${acct.email ? '\n' + acct.email : ''}` }, acct.name.slice(0, 2)) : null;
@@ -1892,7 +1896,7 @@ function cloudRow(d, p) {
               })),
               '-',
               { label: 'Save a restorable copy now', icon: 'cloud', run: () => cloudNow() },
-              { label: 'Restore a copy…', icon: 'import', run: () => cloudRestoreMenu(at.left, at.bottom + 4) },
+              { label: 'Restore a copy…', icon: 'import', sub: (el) => beside(el, () => cloudRestoreMenu(at.left, at.bottom + 4)) },
               { label: 'Read it at loop.prismaple.com/cloud', icon: 'book', run: () => deck.cloudSite() },
               { label: 'How memory and Loop Cloud work', icon: 'book', run: () => deck.openExternal('https://loop.prismaple.com/docs/#memory') },
               '-',
@@ -1972,12 +1976,17 @@ function runsOnModels(agent, account) {
   return agent === 'claude' ? CLAUDE_MODELS : AGENT_MODELS[agent] || [['', `${agentInfo(agent).tool} default`]];
 }
 
-// What a session runs on now. `from` is { id, name, agent, rec? }.
+// What a session runs on now. `from` is { id, name, agent, rec? }, or
+// { project: true, name, agent: 'claude' } for what a project's sessions run on.
 function runsOnNow(p, from) {
+  if (from.project) {
+    const own = llmFor(p.dir, null);
+    return { agent: 'claude', account: own ? `llm:${own}` : accountFor(p.dir, null), model: own ? '' : (S.config.projectModel || {})[p.dir] || '' };
+  }
   if (from.agent !== 'claude') return { agent: from.agent, account: (from.rec && from.rec.account) || 'default', model: (from.rec && from.rec.model) || '' };
   const llm = llmFor(p.dir, from.id);
   const tab = tabFor(from.id);
-  return { agent: 'claude', account: llm ? `llm:${llm}` : tab ? tab.account : accountFor(p.dir, from.id), model: (S.config.sessionModel || {})[from.id] || '' };
+  return { agent: 'claude', account: llm ? `llm:${llm}` : tab ? tab.account : accountFor(p.dir, from.id), model: llm ? '' : (S.config.sessionModel || {})[from.id] || (S.config.projectModel || {})[p.dir] || '' };
 }
 
 function runsOnLine(p, from) {
@@ -2146,9 +2155,54 @@ function runsOnPicker(anchor, p, from) {
     );
     return row;
   });
-  panel(1, [h('div.menu-label', {}, 'Agent'), ...agentRows], anchor);
+  // A project's sessions are Claude Code sessions: its menu starts at the account.
+  if (from.project) return showAccounts(anchor);
+  // A Claude session can follow its project again: its own account and model are forgotten.
+  const follows = from.agent === 'claude' && !ownRunsOn(from.id);
+  const same =
+    from.id || from.rec
+      ? [
+          h(
+            'button.ro-row',
+            {
+              class: follows ? 'on' : '',
+              onmouseenter: () => {
+                clearTimeout(hoverTimer);
+                document.querySelectorAll('#overlay > .ro-panel').forEach((el) => Number(el.dataset.level) >= 2 && el.remove());
+              },
+              onclick: () => (closeMenu(), sameAsProject(p, from)),
+            },
+            icon('folder'),
+            h('span.ro-two', {}, h('b', {}, 'Same as project'), h('small', {}, runsOnLine(p, { project: true, agent: 'claude' }))),
+            follows ? icon('check') : null,
+          ),
+          h('hr'),
+        ]
+      : [];
+  panel(1, [...same, h('div.menu-label', {}, 'Agent'), ...agentRows], anchor);
   const at = runsOnAgents().findIndex((a) => a.id === sel.agent);
-  if (at >= 0) showAccounts(agentRows[at]);
+  if (at >= 0 && !follows) showAccounts(agentRows[at]);
+}
+
+// Whether a session was given an account, key or model of its own.
+const ownRunsOn = (id) => ['sessionAccount', 'sessionLlm', 'sessionModel'].some((k) => S.config[k] && S.config[k][id]);
+
+// A session goes back to what its project's sessions run on. One that is open restarts once.
+async function sameAsProject(p, from) {
+  // On another agent: it is handed to Claude Code, as the project's sessions run, with nothing of its own.
+  if (from.agent !== 'claude') {
+    const pr = runsOnNow(p, { project: true, agent: 'claude' });
+    return switchAgent(p, from, 'claude', { account: String(pr.account).startsWith('llm:') ? accountFor(p.dir, null) : pr.account, model: pr.model });
+  }
+  if (!ownRunsOn(from.id)) return;
+  const tab = tabFor(from.id);
+  if (tab && !(await okToRestart(tab))) return;
+  for (const k of ['sessionAccount', 'sessionLlm', 'sessionModel']) if (S.config[k]) delete S.config[k][from.id];
+  save();
+  if (tab) await restartTab(tab, accountFor(p.dir, null));
+  else if (S.live.has(from.id)) await deck.directStop(from.id).catch(() => {});
+  renderAll();
+  toast(`${from.name} now runs on the same as ${projectTitle(p)}: ${runsOnLine(p, { project: true, agent: 'claude' })}.`);
 }
 
 // The Accounts window, by the name it has outside the picker (the picker has its own openAccounts).
@@ -2159,6 +2213,21 @@ const openAccountsWindow = (id) => openAccounts(id);
 async function applyRunsOn(p, from, now, to) {
   if (to.agent === now.agent && to.account === now.account && (to.model || '') === (now.model || '')) return;
   if (!S.config.sessionModel) S.config.sessionModel = {};
+  if (from.project) {
+    // For the project: nothing running is touched. Sessions opened from now on follow it.
+    if (!S.config.projectModel) S.config.projectModel = {};
+    const key = String(to.account).startsWith('llm:');
+    if (key) S.config.projectLlm[p.dir] = to.account.slice(4);
+    else {
+      delete S.config.projectLlm[p.dir];
+      S.config.projectAccount[p.dir] = to.account;
+    }
+    if (to.model && !key) S.config.projectModel[p.dir] = to.model;
+    else delete S.config.projectModel[p.dir];
+    save();
+    renderAll();
+    return toast(`Sessions opened in ${from.name} from now on run on ${runsOnLine(p, from)}. Open ones keep theirs until you change them.`);
+  }
   const setClaude = () => {
     const id = from.id;
     if (String(to.account).startsWith('llm:')) S.config.sessionLlm[id] = to.account.slice(4);

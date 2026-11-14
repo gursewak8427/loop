@@ -6,7 +6,7 @@ remoteDesk.capture(ipcMain);
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { scanProjects, readLive, isClaudePid, peek, resolveProjectPath: scannerResolvePath, CLAUDE_DIR: CLAUDE_DIR_FOR_TOKENS } = require('./scanner');
+const { scanProjects, readLive, isClaudePid, peek, ensureProjectDir, resolveProjectPath: scannerResolvePath, CLAUDE_DIR: CLAUDE_DIR_FOR_TOKENS } = require('./scanner');
 const scannerResolve = (dir) => scannerResolvePath(dir, []);
 
 // The git remote of a project folder, read from its own config.
@@ -42,6 +42,7 @@ const whatsapp = require('./whatsapp');
 const switches = require('./switches');
 const cloud = require('./cloud');
 const limits = require('./limits');
+const mailbox = require('./mailbox');
 const internet = require('./internet');
 const chat = require('./chat');
 const shellOf = require('./shell');
@@ -144,6 +145,21 @@ const sendAll = (channel, ...args) => {
 };
 
 // Ask a window something and wait for its answer (null if it does not answer in time).
+// Which of Loop's windows a terminal is in: the PC's own window, another window
+// of it, or Loop in a browser (and which browser, as its key was named).
+const placeOf = (wc) => (wc.loopRemote ? { where: 'browser', viewer: wc.viewer || '' } : { where: win && !win.isDestroyed() && wc === win.webContents ? 'pc' : 'window', viewer: '' });
+
+// Tabs this PC's window lent to a browser on another device: tab id -> { spec, to }.
+const lent = new Map();
+// The ones still there, as the window is told: [{ id, sessionId }].
+function lentNow() {
+  for (const [id, l] of lent) if (ptys.owner(id) !== l.to) lent.delete(id); // closed there, or taken by someone else
+  return [...lent].map(([id, l]) => ({ id, sessionId: l.spec.sessionId || '' }));
+}
+function lentChanged() {
+  if (win && !win.isDestroyed()) win.webContents.send('desk:lent', lentNow());
+}
+
 function ask(wc, channel, ...args) {
   return new Promise((resolve) => {
     const id = ++askSeq;
@@ -229,6 +245,7 @@ function loadConfig() {
     sessionAlias: {},
     sessionRole: {},
     projectTeam: {},
+    projectBoss: {}, // project dir -> the session the user made boss of it
     // sessionId -> { parent, task, returns, branch, worktree, repo, status, result }
     subSessions: {},
     // sessionId -> what that session wants back from its sub-sessions
@@ -246,6 +263,7 @@ function loadConfig() {
     // session, or project folder -> a model that is not Claude; see llms.js
     sessionLlm: {},
     sessionModel: {}, // session id -> the model it runs on ('' is the account's default)
+    projectModel: {}, // project dir -> the model its sessions run on, unless a session has its own
     projectLlm: {},
     // Loop's own id -> a session of another agent (Codex, Grok ...); see agents.js
     agentSessions: {},
@@ -319,6 +337,8 @@ async function pollLive() {
   // else": it belongs to this window and can be opened here at any moment.
   const mine = new Set([...direct.list(), ...ptys.held().map((t) => t.sessionId)]);
   for (const l of live) {
+    const open = ptys.find(l.sessionId);
+    if (open) Object.assign(l, { win: open.wc.id, ...placeOf(open.wc) });
     if (mine.has(l.sessionId)) l.bg = true;
     const t = direct.turn(l.sessionId);
     if (t) l.status = t;
@@ -536,19 +556,42 @@ function registerIpc() {
     ptys.hold(id);
     const spec = await ask(from, 'tab:release', id);
     if (!spec) ptys.adopt(id, from); // it never let go: leave it where it was
+    else if (lent.has(id)) {
+      // taken back, or passed on to another device
+      if (e.sender.loopRemote) lent.set(id, { ...lent.get(id), to: e.sender });
+      else lent.delete(id);
+      setTimeout(lentChanged, 300);
+    }
     return spec;
   });
+
+  // ---- Loop in a browser on another device carries on with what is open on this PC ----
+  // When such a browser opens, the tabs of this PC's window move to it, so it
+  // shows what was open here. They are remembered as lent: when that browser
+  // goes away they come back by themselves, and until then this window says
+  // where they are and can call them back.
+  ipcMain.handle('desk:follow', async (e) => {
+    if (!e.sender.loopRemote || !win || win.isDestroyed()) return { specs: [] };
+    const from = win.webContents;
+    const ids = ptys.ownedBy(from);
+    if (!ids.length) return { specs: [] };
+    for (const id of ids) ptys.hold(id);
+    const got = await ask(from, 'tabs:lend');
+    const specs = got && Array.isArray(got.specs) ? got.specs.filter((s) => s && ids.includes(s.id)) : [];
+    // Whatever this window did not hand over stays with it.
+    for (const id of ids) if (!specs.some((s) => s.id === id)) ptys.adopt(id, from);
+    // The screen it had then will be out of date when it comes back: it is drawn again instead.
+    for (const s of specs) lent.set(s.id, { spec: { ...s, snapshot: '' }, to: e.sender });
+    lentChanged();
+    return { specs, active: (got && got.active) || null };
+  });
+  ipcMain.handle('desk:lent', (e) => (e.sender.loopRemote ? [] : lentNow()));
   ipcMain.handle('tab:find', (e, sessionId) => {
     const hit = ptys.find(sessionId, e.sender);
     if (!hit) return false;
-    const w = BrowserWindow.fromWebContents(hit.wc);
-    if (w) {
-      if (w.isMinimized()) w.restore();
-      w.show();
-      w.focus();
-    }
-    hit.wc.send('tab:show', hit.id);
-    return true;
+    // Where it is open: the window asks the person, then moves the terminal to them.
+    // (A browser is not a window Electron knows, so it is never looked up as one.)
+    return { id: hit.id, ...placeOf(hit.wc) };
   });
   ipcMain.on('win:close', (e) => {
     const w = BrowserWindow.fromWebContents(e.sender);
@@ -575,16 +618,25 @@ function registerIpc() {
         const account = String(o.agentAccount || 'default');
         if (account !== 'default' && !(config.agentAccounts || []).some((a) => a.agent === o.agent && a.id === account)) throw new Error('That account was removed. Choose another one.');
         let command = agentCommand;
+        // The tools of its project's environment, through the same single entry a Claude Code session gets.
+        if (o.kind === 'agent') {
+          const tools = hub.entryFor(String(o.dir || ''), String(o.memberId || ''));
+          if (tools) command = agents.withTools(command, o.agent, tools.server.url);
+        }
         if (o.kind === 'agent' && o.agent === 'codex' && config.settings.memoryEnabled !== false) {
           const url = memory.urlFor(String(o.dir || ''), String(o.memberId || ''));
           if (url) {
             await memory.listAll(String(o.dir)).catch(() => []);
+            // Loop's own tools (memory, board, team, mailbox) are approved up front: Codex asks before every
+            // tool call of a tool server, and one set to never ask refuses them all instead.
             // Plain words only: the line goes through cmd, which acts on these.
-            const brief = memory.ownerBrief(String(o.dir), String(o.memberId)).replace(/["%!^&|<>\r\n]/g, ' ').slice(0, 2400);
-            command = command.replace(/^codex\b/, `codex -c mcp_servers.loop_memory.url=${url} -c "developer_instructions=${brief}"`);
+            const brief = [memory.bossBrief(String(o.dir), String(o.memberId)), memory.ownerBrief(String(o.dir), String(o.memberId))].filter(Boolean).join(' ').replace(/["%!^&|<>\r\n]/g, ' ').slice(0, 2400);
+            command = command.replace(/^codex\b/, `codex -c mcp_servers.loop_memory.url=${url} -c mcp_servers.loop_memory.default_tools_approval_mode=approve -c "developer_instructions=${brief}"`);
           }
         }
-        ptys.open(e.sender, { ...o, server: null, agentCommand: command }, config.settings, null, o.kind === 'agentInstall' ? {} : agents.envFor(o.agent, account));
+        // git in the session signs in to GitHub with the project's GitHub tool, if it has one.
+        const gitEnv = o.kind === 'agent' ? await hub.gitEnv(String(o.dir || '')).catch(() => ({})) : {};
+        ptys.open(e.sender, { ...o, server: null, agentCommand: command }, config.settings, null, o.kind === 'agentInstall' ? {} : { ...agents.envFor(o.agent, account), ...gitEnv, ...(o.kind === 'agent' ? mailbox.cliEnv(memory.mailUrlFor(String(o.dir || ''), String(o.memberId || ''))) : {}) });
         return { ok: true };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -627,6 +679,7 @@ function registerIpc() {
     }
     try {
       const isClaude = o.kind === 'resume' || o.kind === 'new';
+      if (isClaude) ensureProjectDir(o.cwd); // or a first session in a new folder is never saved
       const wantsMemory = isClaude && config.settings.memoryEnabled !== false;
       // A session that once had Remote Control on carries a marker in its history, and
       // Claude Code reconnects it on every resume, under whichever account is signed in.
@@ -635,7 +688,7 @@ function registerIpc() {
       // Remote Control is claude.ai's, so it cannot carry a session on another model.
       const llm = isClaude ? llms.pick(config, o.dir, o.sessionId) : '';
       // On a plan, the model chosen for the session; on an API key, the key's own model.
-      o.model = isClaude && !llm ? String((config.sessionModel || {})[o.sessionId] || '') : '';
+      o.model = isClaude && !llm ? String((config.sessionModel || {})[o.sessionId] || (config.projectModel || {})[o.dir] || '') : '';
       o.remote = isClaude && !llm && Boolean((config.sessionRemote || {})[o.sessionId]);
       if (isClaude && !o.remote && o.kind === 'resume' && !liveNow.some((l) => l.sessionId === o.sessionId)) {
         await remote.forget(o.dir, o.sessionId, allAccounts(o.account)).catch(() => {});
@@ -649,7 +702,8 @@ function registerIpc() {
         o.teamBrief = [memory.ownerBrief(o.dir, o.sessionId), o.teamBrief].filter(Boolean).join(' ');
       }
       delete o.gate; // Loop asks no permission of its own: Claude Code handles that
-      const env = { ...accounts.envFor(o.account), ...(isClaude ? viewEnv() : {}), ...llms.envFor(llm), ...(loopOwns ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}) };
+      // Last: git in the session signs in to GitHub with the project's GitHub tool, if it has one.
+      const env = { ...accounts.envFor(o.account), ...(isClaude ? viewEnv() : {}), ...llms.envFor(llm), ...(loopOwns ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}), ...(await hub.gitEnv(String(o.dir || '')).catch(() => ({}))) };
       // Right after login the tools on this PC may still be starting; a session that beats them keeps them red.
       if (isClaude) await localTools.ready(env, o.cwd);
       // One file of tools for the session: Loop's memory, and its environment's tools.
@@ -712,6 +766,11 @@ function registerIpc() {
       return { ok: false, text: err.message };
     }
   };
+  // The mailbox log of a project: written by the window, which delivers; read by its panel.
+  ipcMain.handle('mail:list', (_e, dir) => mailbox.list(String(dir || '')));
+  ipcMain.on('mail:log', (_e, dir, entry) => {
+    if (mailbox.add(String(dir || ''), entry)) sendAll('mail', String(dir));
+  });
   ipcMain.handle('limits:get', (_e, o) => limits.get(String((o && o.agent) || ''), String((o && o.account) || 'default')).catch(() => null));
   // The chat view: a session's conversation, a little at a time.
   ipcMain.handle('chat:read', (_e, o) => chat.read(String((o && o.dir) || ''), String((o && o.sessionId) || ''), Number(o && o.from)).catch(() => ({ size: 0, items: [] })));
@@ -793,21 +852,18 @@ function registerIpc() {
   ipcMain.handle('hub:approve', (_e, key) => hub.approve(String(key)));
   ipcMain.handle('hub:test', (_e, key) => hub.test(String(key)));
   ipcMain.on('hub:site', () => shell.openExternal(cloud.BASE + '/cloud#/tools'));
-  // Hands the tools this PC's Claude Code already has to Loop Cloud, once asked.
-  ipcMain.handle('hub:import', async () => {
-    if (!cloud.state().signedIn) return { ok: false, error: 'Sign in to Loop Cloud first.' };
-    const list = hub.fromClaude(accounts.homeOf('default').json);
-    if (!list.length) return { ok: true, added: 0 };
-    try {
-      const r = await cloud.toolsImport(list);
-      hub.trust(list); // they are this PC's own programs
-      await hubRefresh();
-      return { ok: true, added: r.added, skipped: r.skipped || 0 };
-    } catch (e) {
-      return { ok: false, error: e.message };
-    }
+  // Tools on this PC: added here, kept here, given to every session on this PC.
+  ipcMain.handle('hub:saveLocal', (_e, o) => hub.saveLocal(o || {}));
+  // Signing in to a web tool: Loop finds its sign-in page and the browser opens it.
+  ipcMain.handle('hub:signIn', async (_e, key) => {
+    const r = await hub.signIn(String(key));
+    if (r.ok) shell.openExternal(r.url);
+    return { ok: r.ok, error: r.error || '' };
   });
-
+  ipcMain.handle('hub:signOut', (_e, key) => hub.signOut(String(key)));
+  ipcMain.handle('hub:removeLocal', (_e, key) => hub.removeLocal(String(key)));
+  ipcMain.handle('hub:localOn', (_e, key, on) => hub.setLocalOn(String(key), Boolean(on)));
+  ipcMain.handle('hub:importLocal', () => hub.importLocal(accounts.homeOf('default').json));
   // Updates: see src/main/updater.js.
   ipcMain.handle('update:state', () => updater.get());
   ipcMain.handle('update:check', () => updater.check());
@@ -952,6 +1008,7 @@ function registerIpc() {
       return direct.send({ sessionId: String(o.sessionId), cwd: String(o.cwd), text: String(o.text || ''), warm: Boolean(o.warm), settings: config.settings, spawn: spawnWith, env: {} });
     }
     const account = knownAccount(o.account) ? o.account : 'default';
+    ensureProjectDir(String(o.cwd)); // or a first session in a new folder is never saved
     // Switch off, and nothing of ours running it: delete whatever copy it still
     // points at on claude.ai and close the marker, so this start cannot
     // reconnect it. The same housekeeping a terminal start does.
@@ -963,7 +1020,7 @@ function registerIpc() {
     if (loopOwns) await memory.listAll(String(o.dir)).catch(() => []);
     let env;
     try {
-      env = { ...accounts.envFor(account), ...viewEnv(), ...llms.envFor(llm), ...(loopOwns ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}) };
+      env = { ...accounts.envFor(account), ...viewEnv(), ...llms.envFor(llm), ...(loopOwns ? { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } : {}), ...(await hub.gitEnv(String(o.dir || '')).catch(() => ({}))) };
     } catch (err) {
       return err.message;
     }
@@ -1204,6 +1261,13 @@ if (!app.requestSingleInstanceLock()) {
     // for an update. The user and the CEO both change it, so it is read fresh.
     memory.setCompanyLookup(() => config.company || {});
     memory.setSubLookup((id) => (config.subSessions || {})[id] || null);
+    memory.setBossLookup((dir) => String((config.projectBoss || {})[dir] || ''));
+    mailbox.init(app.getPath('userData'));
+    try {
+      mailbox.installCli(app.getPath('userData'));
+    } catch {
+      // without it, sessions on agents that take no tools cannot send; everything else works
+    }
     memory.onBoard((dir) => sendAll('board', dir));
     // A session asked to change the team: the window owns the settings, so it does the work.
     memory.setTeamDo(
@@ -1214,7 +1278,7 @@ if (!app.requestSingleInstanceLock()) {
           const timer = setTimeout(() => {
             teamWaits.delete(id);
             resolve('Loop did not answer in time. Nothing may have changed; call team_info to check.');
-          }, 20000);
+          }, req && (req.action === 'mail_send' || req.action === 'tell') ? 75000 : 20000);
           teamWaits.set(id, (text) => {
             clearTimeout(timer);
             resolve(String(text));
@@ -1260,7 +1324,8 @@ if (!app.requestSingleInstanceLock()) {
     phone.setHooks({
       openTicket: (ticket) => internet.openTicket(ticket),
       deskServe: (req, res) => remoteDesk.serve(req, res),
-      deskAttach: (ws) => remoteDesk.attach(ws),
+      deskAttach: (ws, viewer) => remoteDesk.attach(ws, viewer),
+      visitorName: (key) => internet.viewerOf(key),
       visitorOk: (key) => internet.visitorOk(key),
       toWindow: (channel, payload) => {
         if (!win || win.isDestroyed()) return false;
@@ -1310,7 +1375,7 @@ if (!app.requestSingleInstanceLock()) {
       onChange: (s) => sendAll('cloud', s),
       afterPull: () => memory.forget(),
     });
-    await hub.init(app.getPath('userData'), { onChange: () => sendAll('hub', hubView()), cloudHeaders: cloud.authHeader, cloudBase: cloud.BASE });
+    await hub.init(app.getPath('userData'), { onChange: () => sendAll('hub', hubView()), cloudHeaders: cloud.authHeader, cloudBase: cloud.BASE, cloudRefresh: () => hubRefresh() });
     setInterval(() => hubRefresh().catch(() => {}), 30e3).unref();
     setTimeout(() => hubRefresh().catch(() => {}), 6e3).unref();
     remoteDesk.init({
@@ -1318,8 +1383,17 @@ if (!app.requestSingleInstanceLock()) {
       nodeModules: path.join(__dirname, '..', '..', 'node_modules'),
       preload: path.join(__dirname, 'preload.js'),
       // A browser that went away leaves its sessions running here, held for the next window.
+      // The ones this PC's window had lent it go back to that window, as they were before.
       onGone: (sender) => {
-        for (const id of ptys.ownedBy(sender)) ptys.hold(id);
+        const back = [];
+        for (const id of ptys.ownedBy(sender)) {
+          ptys.hold(id);
+          const l = lent.get(id);
+          if (l && l.to === sender) back.push(l.spec);
+        }
+        for (const [id, l] of lent) if (l.to === sender) lent.delete(id);
+        if (back.length && win && !win.isDestroyed()) win.webContents.send('tabs:adopt', back);
+        lentChanged();
       },
     });
     internet.init(app.getPath('userData'), {

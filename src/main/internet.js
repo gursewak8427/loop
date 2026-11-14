@@ -257,6 +257,9 @@ const visitorOk = (key) => {
   return Boolean(st.on && k && k.exp > Date.now());
 };
 
+// The name a browser's key was given when it was let in: "Chrome on Android".
+const viewerOf = (key) => (keys[sha(String(key || '').toLowerCase())] || {}).viewer || '';
+
 function init(userData, d) {
   deps = d;
   file = path.join(userData, 'internet.json');
@@ -272,4 +275,4 @@ function stop() {
   beat = null;
 }
 
-module.exports = { init, stop, state, check, setOn, act, test, openTicket, visitorOk, url, isOn: () => Boolean(st.on), tailscaleExe };
+module.exports = { init, stop, state, check, setOn, act, test, openTicket, visitorOk, viewerOf, url, isOn: () => Boolean(st.on), tailscaleExe };

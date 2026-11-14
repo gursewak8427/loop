@@ -336,7 +336,7 @@ function itemMenu(id, x, y) {
     },
     { label: 'Hide from the bar', icon: 'eye', run: () => setBarLayout({ ...L, hidden: [...L.hidden, id] }) },
     '-',
-    { label: 'Choose what the bar shows…', icon: 'gear', run: () => barMenu(x, y) },
+    { label: 'Choose what the bar shows…', icon: 'gear', sub: (el) => beside(el, () => barMenu(x, y)) },
   ]);
 }
 

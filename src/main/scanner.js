@@ -19,6 +19,22 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // non-alphanumeric character replaced by a dash.
 const encodePath = (p) => p.replace(/[^a-zA-Z0-9]/g, '-');
 
+// Claude Code keeps a project's conversations in a folder it makes the first
+// time a session runs there. Under an account Loop added, whose "projects" is a
+// link to the main one, a recent Claude Code cannot make that folder (its mkdir
+// through the link fails with EEXIST) and then saves nothing: the session
+// answers, but it never shows in any list and cannot be opened again. So Loop
+// makes the folder before it starts a session.
+function ensureProjectDir(cwd, root = PROJECTS_DIR) {
+  if (!cwd) return false;
+  try {
+    fs.mkdirSync(path.join(root, encodePath(String(cwd))), { recursive: true });
+    return true;
+  } catch {
+    return false; // Claude Code tries for itself, as before
+  }
+}
+
 const metaCache = new Map(); // file -> { mtimeMs, size, meta }
 const dirCache = new Map(); // project folder name -> resolved cwd | null
 
@@ -383,4 +399,4 @@ async function peek(dirName, sessionId, opts = {}) {
   return turns.reverse();
 }
 
-module.exports = { resolveProjectPath, scanProjects, readLive, isClaudePid, peek, encodePath, rootOf, UUID_RE, CLAUDE_DIR };
+module.exports = { resolveProjectPath, scanProjects, readLive, isClaudePid, peek, ensureProjectDir, encodePath, rootOf, UUID_RE, CLAUDE_DIR };
