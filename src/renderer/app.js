@@ -2163,7 +2163,7 @@ function renderTools() {
         'div.tool-group',
         {},
         tool('Teams: sets of sessions that open together', 'team', false, (e) => teamsMenu(e.currentTarget)),
-        tool(`Talk to the session in front: it listens and answers out loud  ${MOD}+Shift+V`, 'mic', voiceOn(), toggleVoice),
+        S.switches.voice ? tool(`Talk to the session in front: it listens and answers out loud  ${MOD}+Shift+V`, 'mic', voiceOn(), toggleVoice) : null,
         tool(`Broadcast one prompt to several sessions  ${MOD}+Shift+B`, 'broadcast', S.composerOpen, toggleComposer),
         tool(`Memory and tasks  ${MOD}+Shift+M`, 'book', S.drawer.open, toggleDrawer),
         S.remote ? null : tool('Tools: the MCP servers your sessions can use, on this PC and from Loop Cloud', 'plug', false, openTools),
@@ -2769,7 +2769,7 @@ window.addEventListener(
       activate(S.order[(i + (e.shiftKey ? -1 : 1) + S.order.length) % S.order.length]);
     } else if (!modKey(e)) return;
     else if (e.shiftKey && e.code === 'KeyG') setLayout(S.config.layout === 'grid' ? 'focus' : 'grid');
-    else if (e.shiftKey && e.code === 'KeyV') toggleVoice();
+    else if (e.shiftKey && e.code === 'KeyV' && S.switches.voice) toggleVoice();
     else if (e.shiftKey && e.code === 'KeyB') toggleComposer();
     else if (e.shiftKey && e.code === 'KeyM') toggleDrawer();
     else if (e.shiftKey && e.code === 'KeyW' && S.active) closeTab(S.active);

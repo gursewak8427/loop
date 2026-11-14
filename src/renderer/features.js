@@ -67,7 +67,7 @@ function paletteItems() {
       rank: 5,
       run: () => setLayout(S.config.layout === 'grid' ? 'focus' : 'grid'),
     },
-    { label: 'Talk to this session (voice mode)', hint: `${MOD}+Shift+V`, glyph: 'mic', rank: 4, run: toggleVoice },
+    ...(S.switches.voice ? [{ label: 'Talk to this session (voice mode)', hint: `${MOD}+Shift+V`, glyph: 'mic', rank: 4, run: toggleVoice }] : []),
     { label: 'Broadcast a prompt', hint: `${MOD}+Shift+B`, glyph: 'broadcast', rank: 4, run: toggleComposer },
     { label: 'Memory', hint: `${MOD}+Shift+M`, glyph: 'book', rank: 3, run: toggleDrawer },
     { label: 'Accounts', hint: 'Claude, ChatGPT, Grok, Gemini, Kimi, custom', glyph: 'person', rank: 2.5, run: openAccounts },
