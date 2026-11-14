@@ -1,6 +1,6 @@
 # Loop
 
-**A control room for Claude Code.** Run many Claude Code sessions side by side on Windows, give them roles and a shared memory, and follow or steer them from your phone, including by voice with the screen off.
+**A control room for Claude Code.** Run many Claude Code sessions side by side on Windows, give them roles and a shared memory, and follow or steer them from your phone.
 
 [![test](https://github.com/gursewak8427/loop/actions/workflows/test.yml/badge.svg)](https://github.com/gursewak8427/loop/actions/workflows/test.yml)
 [![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -15,8 +15,6 @@
   <img src="docs/screenshots/phone-home.png" width="260" alt="Home on the phone: a plan from the CEO waiting for an OK, and a finished report from the CTO">
   &nbsp;
   <img src="docs/screenshots/phone-chat.png" width="260" alt="A session's conversation on the phone, with the tools it used folded into one line">
-  &nbsp;
-  <img src="docs/screenshots/phone-voice.png" width="260" alt="Voice mode: the phone listening, showing the words as they are heard">
 </p>
 
 <p align="center"><sub>The phone app, drawn from the code with made-up data (<code>npm run screenshots</code>).</sub></p>
@@ -28,7 +26,6 @@ Claude Code is one terminal and one conversation. Real work quickly turns into f
 - **Every session, organised.** Workspaces hold projects, projects hold sessions. Each one opens as a real terminal at its project folder, already resumed. Live lamps show which are working, idle or stopped.
 - **Sessions that work as a team.** Give each a role (CEO, CTO, developer, QA...). They get a shared memory, a task board and a way to message each other, so you give one goal and the work is passed along.
 - **Your phone as the remote.** Over your own Tailscale network: read any session as a conversation, answer the questions Claude asks, approve a plan, send a photo.
-- **Voice mode.** Open a session on the phone, tap the waveform button and talk. Loop sends what you said, waits for the answer, reads it out in a sentence or two, and listens again. It is built for working with your eyes closed.
 - **Servers too.** A session can run on another machine over SSH, inside `tmux`, so it keeps working when you close everything.
 - **Several Claude accounts.** Pick one per workspace, project or session, and switch a running session to another when one runs out.
 
@@ -36,7 +33,7 @@ Claude Code is one terminal and one conversation. Real work quickly turns into f
 
 - Windows 10 or 11. macOS runs from source (see [CONTRIBUTING.md](CONTRIBUTING.md)); Linux should too, but is untested.
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in (`claude` on your `PATH`).
-- For the phone: [Tailscale](https://tailscale.com) on the PC and the phone. For voice mode in a phone browser, turn on MagicDNS and HTTPS certificates for your tailnet, because a browser only gives a page the microphone over HTTPS.
+- For the phone: [Tailscale](https://tailscale.com) on the PC and the phone.
 
 ## Install
 
@@ -60,7 +57,7 @@ To look around without your own sessions, `npm run demo` starts Loop on made-up 
 2. On the phone, open the address in Chrome, or install the app (see [app/README.md](app/README.md) for Android and iPhone).
 3. Enter the pairing code once.
 
-Use the Tailscale address (it starts with `100.`) and it works from anywhere. For voice mode in the browser, use the `https://<your-pc>.<tailnet>.ts.net:8788` address that Loop shows.
+Use the Tailscale address (it starts with `100.`) and it works from anywhere.
 
 Loop gives whoever pairs full control of your sessions. Keep it on your private Tailscale network and never forward its ports to the internet.
 
